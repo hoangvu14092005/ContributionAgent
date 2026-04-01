@@ -1,0 +1,8 @@
+chạy hệ thống: contribai hunt --rounds 1
+cấu hình:
+ag = antigravity
+gh = github
+cx = codex
+
+trong config.yaml:
+  stars_range: [50, 30000]  <<= chỉnh sửa range của start repo

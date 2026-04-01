@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "contribai"
+version = "4.1.0"
+description = "AI Agent that automatically contributes to open source projects on GitHub"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "ContribAI Team" }]
+keywords = ["ai", "agent", "github", "open-source", "contributions"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "pydantic>=2.5,<3.0",
+    "pydantic-settings>=2.1,<3.0",
+    "pyyaml>=6.0,<7.0",
+    "click>=8.1,<9.0",
+    "rich>=13.0,<15.0",
+    "gitpython>=3.1,<4.0",
+    "jinja2>=3.1,<4.0",
+    "aiosqlite>=0.19,<1.0",
+    "google-genai>=1.0,<2.0",
+    "openai>=1.10,<3.0",
+    "anthropic>=0.40,<1.0",
+    "fastapi>=0.115,<1.0",
+    "uvicorn>=0.32,<1.0",
+    "apscheduler>=3.10,<4.0",
+    "httpx>=0.27,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<10.0",
+    "pytest-asyncio>=0.23,<2.0",
+    "pytest-cov>=5.0,<8.0",
+    "ruff>=0.3,<1.0",
+    "respx>=0.21,<1.0",
+]
+local-llm = [
+    "ollama>=0.4,<1.0",
+]
+mcp = [
+    "mcp>=1.0,<2.0",
+]
+
+[project.scripts]
+contribai = "contribai.cli.main:cli"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["contribai"]
+omit = [
+    "contribai/web/*",
+    "contribai/scheduler/*",
+    "contribai/plugins/*",
+    "contribai/templates/*",
+    "contribai/notifications/*",
+    "contribai/cli/tui.py",
+    "contribai/core/leaderboard.py",
+    "contribai/core/profiles.py",
+    "contribai/core/quotas.py",
+    "contribai/llm/agents.py",
+    "contribai/llm/models.py",
+    "contribai/llm/router.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__",
+    "if TYPE_CHECKING",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["contribai"]
