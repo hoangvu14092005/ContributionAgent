@@ -273,6 +273,3 @@ my_analyzer = "my_package:MyAnalyzer"
 | [**BAO_MAT_TOKEN.md**](docs/BAO_MAT_TOKEN.md) | **Token security** — How to protect GitHub tokens (Tiếng Việt) |
 | [`GITHUB_TOKEN_SETUP.md`](docs/GITHUB_TOKEN_SETUP.md) | GitHub token creation guide |
 
-## License
-
-AGPL-3.0 + Commons Clause — see [LICENSE](LICENSE) for details.
