@@ -26,14 +26,7 @@ ContribAI discovers open source repositories, analyzes code for improvements, ge
 **Safety:** Quality gate (7-check scorer), duplicate detection, AI policy respect, CI monitoring, rate limiting, dry-run mode
 
 ## Quick Start
-
-```bash
-# 1. Install
-git clone https://github.com/chinhkrb113/ContribAI.git
-cd ContribAI
-pip install -e ".[dev]"
-
-# 2. Configure
+ Configure
 cp .env.example .env
 cp config.example.yaml config.yaml
 
