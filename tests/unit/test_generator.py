@@ -47,7 +47,7 @@ def context(sample_repo):
 class TestGenerateBranchName:
     def test_security_fix_branch(self, generator, security_finding):
         name = generator._generate_branch_name(security_finding)
-        assert name.startswith("contribai/fix/security/")
+        assert name.startswith("fix/security/")
         assert "hardcoded" in name
 
     def test_docs_branch(self, generator):
@@ -59,7 +59,7 @@ class TestGenerateBranchName:
             file_path="README.md",
         )
         name = generator._generate_branch_name(finding)
-        assert name.startswith("contribai/docs/")
+        assert name.startswith("docs/")
 
     def test_branch_name_sanitized(self, generator):
         finding = Finding(

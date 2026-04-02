@@ -934,10 +934,12 @@ class ContribPipeline:
             )
             for gpr in github_prs:
                 past_titles_lower.add(gpr.get("title", "").lower())
-                # Extract file paths from branch name (contribai branches encode the topic)
+                # Extract file paths from branch name (bot branches use patterns like fix/, docs/, feat/)
                 head = gpr.get("head", {})
                 branch_label = head.get("label", "")
-                if "contribai/" in branch_label:
+                # Check if branch matches bot patterns
+                bot_patterns = ["fix/", "docs/", "feat/", "perf/", "refactor/", "improve/"]
+                if any(pattern in branch_label for pattern in bot_patterns):
                     past_titles_lower.add(gpr.get("title", "").lower())
                 # Track all recently-targeted file info from PR body
                 body = gpr.get("body", "") or ""

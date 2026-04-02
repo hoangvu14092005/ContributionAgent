@@ -21,6 +21,7 @@ from contribai.core.models import (
     Finding,
     RepoContext,
 )
+from contribai.generator.style_validator import StyleValidator
 from contribai.llm.context import build_repo_context_prompt
 from contribai.llm.provider import LLMProvider
 
@@ -34,6 +35,7 @@ class ContributionGenerator:
         self._llm = llm
         self._config = config
         self._memory = memory  # Optional Memory for repo_preferences
+        self._style_validator = StyleValidator()  # Phase 1 - Quick Win #3
 
     async def generate(
         self,
@@ -138,6 +140,21 @@ class ContributionGenerator:
                     )
                     changes = None
                     continue
+                
+                # 3c: Validate style (Phase 1 - Quick Win #3)
+                style_result = self._validate_style(changes, context)
+                if not style_result.passed:
+                    last_error = (
+                        f"Generated code failed style validation (score: {style_result.score:.1f}/10). "
+                        f"Issues: {'; '.join(style_result.issues[:2])}"
+                    )
+                    logger.warning(
+                        "Style validation failed for %s: %s",
+                        finding.title,
+                        "; ".join(style_result.issues),
+                    )
+                    changes = None
+                    continue
 
                 break  # Success
 
@@ -229,6 +246,24 @@ class ContributionGenerator:
             "6. Do NOT refactor adjacent code — fix only the reported issue\n"
             "7. Do NOT add comments explaining what the code does (self-documenting)\n"
             "8. Do NOT modify files unrelated to the finding\n\n"
+            "MINIMALISM RULES (Phase 1 - Critical):\n"
+            "- Change ONLY the lines directly related to the issue\n"
+            "- Do NOT reformat, reorganize, or 'improve' unrelated code\n"
+            "- Do NOT change variable names unless absolutely necessary\n"
+            "- Do NOT add 'nice to have' features or enhancements\n"
+            "- Aim to change < 20% of any file (ideally < 10%)\n"
+            "- If fixing multiple instances, change ONLY those instances\n"
+            "- Prefer surgical edits over file rewrites\n\n"
+            "BAD EXAMPLES (What NOT to do):\n"
+            "❌ Fixing a typo but also reformatting the entire file\n"
+            "❌ Adding error handling AND refactoring the function structure\n"
+            "❌ Fixing a bug AND renaming variables for 'clarity'\n"
+            "❌ Updating docs AND reorganizing sections\n\n"
+            "GOOD EXAMPLES (What TO do):\n"
+            "✅ Change only the 2-3 lines that fix the security issue\n"
+            "✅ Add missing null check without touching other logic\n"
+            "✅ Fix typo in exactly one place, leave rest unchanged\n"
+            "✅ Update outdated API call, keep surrounding code identical\n\n"
             "OUTPUT FORMAT RULES (CRITICAL):\n"
             "- Return ONLY raw JSON — no markdown fences, no ```json blocks\n"
             "- No explanatory text before or after the JSON\n"
@@ -239,6 +274,7 @@ class ContributionGenerator:
             "- Is the change obviously correct with no side effects?\n"
             "- Does it follow the project's established patterns?\n"
             "- Is it genuinely useful (not busywork or cosmetic)?\n"
+            "- Is it the MINIMUM change needed (not a nice-to-have refactor)?\n"
             f"{style_section}\n"
             f"REPOSITORY CONTEXT:\n{repo_context}"
         )
@@ -511,6 +547,52 @@ class ContributionGenerator:
             prev_ch = ch
 
         return len(stack)
+
+    def _validate_style(
+        self, changes: list[FileChange], context: RepoContext
+    ) -> StyleValidationResult:
+        """Validate generated code style against repository conventions.
+
+        Args:
+            changes: List of FileChange objects to validate
+            context: Repository context containing coding_style
+
+        Returns:
+            StyleValidationResult with pass/fail status and score
+        """
+        from contribai.analysis.repo_conventions import RepoConventions
+        from contribai.generator.style_validator import StyleValidationResult
+
+        # Extract conventions from context
+        # If coding_style is a string, we need to parse it or use defaults
+        # For now, we'll extract conventions from relevant_files
+        conventions = RepoConventions.extract_from_files(
+            context.repo, context.relevant_files
+        )
+
+        # Validate each file change
+        all_issues = []
+        all_warnings = []
+        total_score = 0.0
+        validated_count = 0
+
+        for change in changes:
+            if not change.new_content:
+                continue
+
+            result = self._style_validator.validate(change.new_content, conventions)
+            all_issues.extend(result.issues)
+            all_warnings.extend(result.warnings)
+            total_score += result.score
+            validated_count += 1
+
+        # Calculate average score
+        avg_score = total_score / validated_count if validated_count > 0 else 10.0
+        passed = avg_score >= 7.0 and len(all_issues) == 0
+
+        return StyleValidationResult(
+            passed=passed, score=avg_score, issues=all_issues, warnings=all_warnings
+        )
 
     def _find_cross_file_instances(self, finding: Finding, context: RepoContext) -> dict[str, str]:
         """Find other files in the repo with the same issue pattern.
@@ -808,7 +890,7 @@ class ContributionGenerator:
         prefix = prefix_map.get(finding.type, "fix")
         # Clean title for branch name
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", finding.title.lower()).strip("-")[:40]
-        return f"contribai/{prefix}/{slug}"
+        return f"{prefix}/{slug}"
 
     def _generate_pr_title(self, finding: Finding, *, guidelines=None) -> str:
         """Generate a PR title adapted to repo conventions."""

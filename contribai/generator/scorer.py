@@ -63,6 +63,7 @@ class QualityScorer:
 
         checks["has_changes"] = self._check_has_changes(contribution)
         checks["change_size"] = self._check_change_size(contribution)
+        checks["minimalism"] = self._check_minimalism(contribution)  # Phase 1 - Quick Win #5
         checks["commit_message"] = self._check_commit_message(contribution)
         checks["description"] = self._check_description(contribution)
         checks["no_debug_code"] = self._check_no_debug_code(contribution)
@@ -110,6 +111,58 @@ class QualityScorer:
             return CheckResult("change_size", True, 0.7, f"Large change ({total_lines} lines)")
         else:
             return CheckResult("change_size", True, 1.0, f"Good change size ({total_lines} lines)")
+
+    def _check_minimalism(self, c: Contribution) -> CheckResult:
+        """Check that changes are minimal and focused.
+
+        Phase 1 - Quick Win #5: Stricter minimalism scoring
+        Penalizes:
+        - Changes affecting > 20% of file
+        - Multiple unrelated files changed
+        - Large refactoring when only small fix needed
+        """
+        issues = []
+        total_penalty = 0.0
+
+        for change in c.changes:
+            if not change.original_content:
+                continue  # New files are OK
+
+            original_lines = change.original_content.splitlines()
+            new_lines = change.new_content.splitlines()
+
+            # Calculate change ratio
+            if len(original_lines) > 0:
+                lines_changed = sum(
+                    1 for old, new in zip(original_lines, new_lines) if old != new
+                )
+                # Add lines added/removed
+                lines_changed += abs(len(new_lines) - len(original_lines))
+                change_ratio = lines_changed / len(original_lines)
+
+                # Penalty for changing > 20% of file
+                if change_ratio > 0.2:
+                    penalty = min(0.3, (change_ratio - 0.2) * 1.5)
+                    total_penalty += penalty
+                    issues.append(
+                        f"{change.path}: {change_ratio:.0%} of file changed (> 20% threshold)"
+                    )
+
+        # Penalty for too many files
+        if len(c.changes) > 5:
+            penalty = min(0.2, (len(c.changes) - 5) * 0.05)
+            total_penalty += penalty
+            issues.append(f"{len(c.changes)} files changed (> 5 files)")
+
+        # Calculate final score
+        score = max(0.0, 1.0 - total_penalty)
+        passed = score >= 0.7  # Stricter threshold
+
+        if not issues:
+            return CheckResult("minimalism", True, 1.0, "Changes are minimal and focused")
+
+        reason = f"Minimalism issues: {'; '.join(issues[:2])}"
+        return CheckResult("minimalism", passed, score, reason)
 
     def _check_commit_message(self, c: Contribution) -> CheckResult:
         """Commit message follows conventional format."""

@@ -63,7 +63,7 @@ def sample_contribution(sample_finding):
         description="Removed unused import",
         changes=[FileChange(path="main.py", new_content="# clean code")],
         commit_message="fix: remove unused import",
-        branch_name="contribai/fix/dead-code",
+        branch_name="fix/dead-code",
     )
 
 

@@ -15,6 +15,7 @@ import uuid
 from fnmatch import fnmatch
 
 from contribai.analysis.context_compressor import ContextCompressor
+from contribai.analysis.repo_conventions import RepoConventions
 from contribai.core.config import AnalysisConfig
 from contribai.core.models import (
     AnalysisResult,
@@ -229,7 +230,22 @@ class CodeAnalyzer:
         # Detect project profile and style
         profile = self._detect_project_profile(repo, tree, readme)
         style_guide = self._build_style_guide(relevant_files)
-        coding_style = f"PROJECT PROFILE:\n{profile}\n\nSTYLE GUIDE:\n{style_guide}"
+        
+        # Extract repository conventions (Phase 1 - Quick Win #1)
+        conventions = RepoConventions.extract_from_files(repo, relevant_files)
+        logger.info(
+            "📋 Conventions: %s, %s, %s quotes (confidence: %.0f%%)",
+            conventions.naming_convention,
+            conventions.indentation,
+            conventions.quote_style,
+            conventions.confidence * 100,
+        )
+        
+        coding_style = (
+            f"PROJECT PROFILE:\n{profile}\n\n"
+            f"STYLE GUIDE:\n{style_guide}\n\n"
+            f"{conventions.to_prompt_context()}"
+        )
 
         # Compress files to fit within token budget
         compressed_files = self._compressor.compress_files(relevant_files)
