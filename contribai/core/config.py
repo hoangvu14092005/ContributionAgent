@@ -59,6 +59,19 @@ class LLMConfig(BaseModel):
     custom_models: dict[str, str] = Field(default_factory=dict)
     custom_base_url: str = ""
 
+    # ── Fallback chains (per task, ordered by preference) ────────────────────
+    # Each task can have a chain of provider/model slots. If one fails,
+    # the next slot is tried automatically. See contribai/llm/fallback.py.
+    #
+    # Example YAML:
+    #   fallback_chains:
+    #     analysis:
+    #       - {provider: rocket-free-2, base_url: ..., model: glm-5-free}
+    #       - {provider: copilot,      base_url: ..., model: claude-sonnet-4.6}
+    #       - {provider: rocket-free-1, base_url: ..., model: kilo-auto/free}
+    fallback_chains: dict[str, list[dict]] = Field(default_factory=dict)
+    fallback_enabled: bool = False  # Master switch for fallback mechanism
+
     @model_validator(mode="after")
     def resolve_api_key_and_defaults(self):
         """Fallback: env vars for API keys + default model per provider."""
@@ -192,6 +205,8 @@ class PipelineConfig(BaseModel):
     max_retries: int = 2  # middleware retry count
     min_quality_score: float = 7.0  # Phase 1: Increased from 5.0 to 7.0 for stricter quality gate
     human_review: bool = False  # pause for human approval before creating PRs
+    check_ci: bool = True  # Auto-close PR if CI fails
+    max_findings_per_repo: int = 3  # Cap on findings per repo (was hardcoded 2)
 
 
 class QuotaConfig(BaseModel):
@@ -249,10 +264,34 @@ class ContribAIConfig(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
 
+def _expand_env_vars(obj):
+    """Recursively expand ``${VAR}`` and ``${VAR:-default}`` in config values."""
+    import re
+    import os
+
+    pattern = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+
+    def _expand(value):
+        if isinstance(value, str):
+            def replacer(match):
+                var_name = match.group(1)
+                default = match.group(2)
+                return os.environ.get(var_name, default if default is not None else "")
+            return pattern.sub(replacer, value)
+        elif isinstance(value, dict):
+            return {k: _expand(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [_expand(item) for item in value]
+        return value
+
+    return _expand(obj)
+
+
 def load_config(path: str | Path | None = None) -> ContribAIConfig:
     """Load configuration from YAML file.
 
     Priority: explicit path > ./config.yaml > ~/.contribai/config.yaml > defaults
+    Supports ``${VAR}`` and ``${VAR:-default}`` env var expansion in all values.
     """
     search_paths = [
         Path(path) if path else None,
@@ -264,6 +303,7 @@ def load_config(path: str | Path | None = None) -> ContribAIConfig:
         if p and p.exists():
             try:
                 raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                raw = _expand_env_vars(raw)
                 return ContribAIConfig(**raw)
             except yaml.YAMLError as e:
                 raise ConfigError(f"Invalid YAML in {p}: {e}") from e

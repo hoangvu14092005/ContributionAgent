@@ -990,13 +990,15 @@ class ContribPipeline:
         # Validate findings against full file content to filter false positives
         validated_findings = await self._validate_findings(filtered_findings, relevant_files)
 
-        # Limit to max 2 findings per repo to avoid spamming
-        if len(validated_findings) > 2:
+        # Configurable limit per repo (default 3, was hardcoded 2)
+        max_findings_per_repo = getattr(self.config.pipeline, "max_findings_per_repo", 3)
+        if len(validated_findings) > max_findings_per_repo:
             logger.info(
-                "📉 Limiting to 2 findings per repo (had %d)",
+                "📉 Limiting to %d findings per repo (had %d)",
+                max_findings_per_repo,
                 len(validated_findings),
             )
-            validated_findings = validated_findings[:2]
+            validated_findings = validated_findings[:max_findings_per_repo]
 
         logger.info(
             "🔎 Validated %d/%d findings (filtered %d false positives)",

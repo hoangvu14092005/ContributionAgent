@@ -23,7 +23,7 @@ It is itself an AI agent that operates on other GitHub repositories.
 | GitHub | REST API v3 (via httpx) |
 | Web | FastAPI + uvicorn |
 | CLI | Typer + Rich |
-| Tests | pytest (431 tests) |
+| Tests | pytest (520 tests, 32 new) |
 | Lint | ruff |
 
 ## Architecture (v4.1.0)
@@ -44,6 +44,7 @@ Discovery → Middleware Chain → Analysis → Generation → PR → CI Monitor
 8. **Event Bus** — 15 typed events with async subscribers and JSONL logging (`contribai/core/events.py`)
 9. **Working Memory** — Auto-load/save context per repo with TTL (`contribai/orchestrator/memory.py`)
 10. **Sandbox** — Docker-based code validation with local fallback (`contribai/sandbox/sandbox.py`)
+11. **Skill Discovery** — `.agents/` markdown files parsed by `contribai/agents/skill_loader.py`; discoverable via `contribai skills list | find | show`
 
 ### Module Dependency Graph
 ```
@@ -62,6 +63,7 @@ cli/main.py
         ├── issues/solver.py (issue solving)
         ├── orchestrator/memory.py (SQLite + working_memory)
         ├── agents/registry.py (sub-agent orchestration)
+        ├── agents/skill_loader.py (parse .agents/ markdown frontmatter)
         ├── tools/protocol.py (tool interface)
         ├── analysis/context_compressor.py (LLM compression)
         ├── core/events.py (event bus + JSONL logger)
@@ -126,10 +128,71 @@ cached = await memory.get_context(repo, "analysis_summary")
 - **Skip extensions**: `.md`, `.yaml`, `.json`, `.toml`, `.cfg`, `.ini`
 - **Protected meta files**: Any governance/meta files are off-limits
 
+## Agent Skill Catalog
+
+`.agents/` contains 30 markdown skills in 3 categories. All are programmatically discoverable via `contribai skills list`. Add a new skill by dropping a markdown file with YAML frontmatter (`description`, optional `trigger`, optional `inputs`).
+
+### Agents (`.agents/agents/`) — role personas
+| File | Trigger | Role |
+|------|---------|------|
+| `backend-dev.md` | — | Implements core features, Python modules, API integrations |
+| `code-reviewer.md` | — | Reviews all PRs for quality, consistency, best practices |
+| `codereview-roasted.md` | `/codereview-roasted` | Linus Torvalds-style brutally honest review persona |
+| `code-review-patterns.md` | `/code-review` | Style, naming, complexity, architecture review checklist |
+| `devops-engineer.md` | — | CI/CD, Docker, builds, deployments, infrastructure |
+| `github-ops.md` | `/github` | How to use gh CLI and GitHub REST API correctly |
+| `product-manager.md` | — | Prioritizes features, writes specs, manages roadmap |
+| `qa-engineer.md` | — | Test coverage, edge cases, flakiness |
+| `security-engineer.md` | — | Audits code for vulnerabilities, reviews security changes |
+| `security-patterns.md` | `/security` | Core security principles + OWASP-aligned checklist |
+| `tech-lead.md` | — | Architecture decisions, code review coordination |
+| `technical-writer.md` | — | Documentation, README, CHANGELOG |
+
+### Workflows (`.agents/workflows/`) — procedural step-by-step
+| File | Trigger | Purpose |
+|------|---------|---------|
+| `address_pr_comments.md` | `/address_pr_comments` | Read PR review feedback and reply with code fixes |
+| `add_agent.md` | `/add_agent` | Guided creation of a new agent/workflow file |
+| `agent-builder.md` | `/agent-builder` | Interview user ≤5 questions and design a new agent |
+| `agent_memory.md` | `/remember` | Maintain per-repo memory at `.agents/agents/memory/<repo>.md` |
+| `debug.md` | — | Debug pipeline / agent failure |
+| `deploy.md` | — | Production deploy checklist |
+| `dev.md` | — | ContribAI development workflow |
+| `docs.md` | — | Documentation update procedure |
+| `git-flow.md` | — | Branching, merging, DCO signoff |
+| `release.md` | — | Version bump, changelog, tag, publish |
+| `review.md` | — | Code review workflow |
+| `security-audit.md` | — | Security audit checklist |
+| `setup.md` | — | New developer onboarding |
+| `test.md` | — | Run tests, check coverage, fix failures |
+| `update_pr_description.md` | `/update_pr_description` | Refresh PR body to reflect current diff |
+| `update_test.md` | `/update_test` | Fix failing tests to match intentional behavior change |
+
+### Knowledge (`.agents/knowledge/`) — reference docs
+| File | Trigger | Topic |
+|------|---------|-------|
+| `default-tools.md` | `/default-tools` | MCP stdio servers auto-loaded per session |
+| `onboarding.md` | `/onboard` | First-time user interview + step-by-step plan |
+
+### CLI discovery
+```bash
+contribai skills list                    # All 30 skills in a table
+contribai skills list --category workflow
+contribai skills list --has-trigger
+contribai skills find PR                 # Keyword search
+contribai skills show /address_pr_comments   # Full body
+contribai skills show update_test
+```
+
+- **Code files only**: ContribAI only modifies `.py`, `.js`, `.ts`, `.go`, `.rs` etc.
+- **Never modify**: `LICENSE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `.github/FUNDING.yml`
+- **Skip extensions**: `.md`, `.yaml`, `.json`, `.toml`, `.cfg`, `.ini`
+- **Protected meta files**: Any governance/meta files are off-limits
+
 ## Testing
 
 ```bash
-pytest tests/ -v                  # 400+ tests
+pytest tests/ -v                  # 520 tests
 pytest tests/ -v --cov=contribai  # With coverage (threshold: 50%)
 ```
 

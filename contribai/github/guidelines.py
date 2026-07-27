@@ -377,8 +377,7 @@ def _default_pr_body(
 
 def _contribai_attribution() -> str:
     return (
-        "Contributed by Lê Thành Chỉnh\n"
-        "Code is a tool. Mindset is the real value."
+        "Contributed by Hoàng Anh Vũ"
     )
 
 

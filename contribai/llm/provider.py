@@ -566,12 +566,34 @@ def create_llm_provider(
 ) -> LLMProvider:
     """Create an LLM provider instance from config.
 
+    Resolution order:
+      1. If ``fallback_enabled`` is True and ``fallback_chains`` is configured,
+         wrap in a :class:`FallbackChainProvider` that tries each provider in
+         order on failure.
+      2. If ``multi_model=True`` and provider is Gemini, wrap with
+         :class:`MultiModelProvider` for per-task model routing.
+      3. Otherwise, instantiate the configured provider directly.
+
     Args:
         config: LLM configuration
         multi_model: If True and provider is Gemini, wrap with
                      MultiModelProvider for per-task model routing
         strategy: Routing strategy (performance/balanced/economy)
     """
+    # ── Fallback chain takes priority over multi-model ─────────────────────
+    if config.fallback_enabled and config.fallback_chains:
+        from contribai.llm.fallback import (
+            FallbackChainProvider,
+            build_fallback_chains,
+        )
+        chains, default_chain = build_fallback_chains(config)
+        logger.info(
+            "🔗 Using fallback chain provider (tasks=%d, default chain length=%d)",
+            len(chains),
+            len(default_chain),
+        )
+        return FallbackChainProvider(config, chains, default_chain)
+
     provider_cls = _PROVIDERS.get(config.provider)
     if not provider_cls:
         raise LLMError(

@@ -100,26 +100,26 @@ class QualityScorer:
                 0.3,
                 f"Very small change ({total_lines} lines)",
             )
-        elif total_lines > 500:
+        elif total_lines > 1500:  # Relaxed: was 500
             return CheckResult(
                 "change_size",
                 False,
                 0.4,
                 f"Very large change ({total_lines} lines)",
             )
-        elif total_lines > 200:
+        elif total_lines > 500:  # Relaxed: was 200
             return CheckResult("change_size", True, 0.7, f"Large change ({total_lines} lines)")
         else:
             return CheckResult("change_size", True, 1.0, f"Good change size ({total_lines} lines)")
 
     def _check_minimalism(self, c: Contribution) -> CheckResult:
-        """Check that changes are minimal and focused.
+        """Check that changes are focused (relaxed for real contributions).
 
-        Phase 1 - Quick Win #5: Stricter minimalism scoring
-        Penalizes:
-        - Changes affecting > 20% of file
-        - Multiple unrelated files changed
-        - Large refactoring when only small fix needed
+        Phase 1 - Quick Win #5: Original strict scoring.
+        Phase 4 - Relaxed: Allow larger refactors and more files for real bugs/features.
+        Penalizes (but lenient):
+        - Changes affecting > 40% of file (was 20%)
+        - > 8 files in single PR (was 5)
         """
         issues = []
         total_penalty = 0.0
@@ -136,30 +136,29 @@ class QualityScorer:
                 lines_changed = sum(
                     1 for old, new in zip(original_lines, new_lines) if old != new
                 )
-                # Add lines added/removed
                 lines_changed += abs(len(new_lines) - len(original_lines))
                 change_ratio = lines_changed / len(original_lines)
 
-                # Penalty for changing > 20% of file
-                if change_ratio > 0.2:
-                    penalty = min(0.3, (change_ratio - 0.2) * 1.5)
+                # Relaxed: penalty starts at 40% (was 20%)
+                if change_ratio > 0.4:
+                    penalty = min(0.3, (change_ratio - 0.4) * 1.0)
                     total_penalty += penalty
                     issues.append(
-                        f"{change.path}: {change_ratio:.0%} of file changed (> 20% threshold)"
+                        f"{change.path}: {change_ratio:.0%} of file changed (> 40% threshold)"
                     )
 
-        # Penalty for too many files
-        if len(c.changes) > 5:
-            penalty = min(0.2, (len(c.changes) - 5) * 0.05)
+        # Relaxed: allow up to 8 files (was 5)
+        if len(c.changes) > 8:
+            penalty = min(0.2, (len(c.changes) - 8) * 0.05)
             total_penalty += penalty
-            issues.append(f"{len(c.changes)} files changed (> 5 files)")
+            issues.append(f"{len(c.changes)} files changed (> 8 files)")
 
         # Calculate final score
         score = max(0.0, 1.0 - total_penalty)
-        passed = score >= 0.7  # Stricter threshold
+        passed = score >= 0.6  # Relaxed: was 0.7
 
         if not issues:
-            return CheckResult("minimalism", True, 1.0, "Changes are minimal and focused")
+            return CheckResult("minimalism", True, 1.0, "Changes are focused")
 
         reason = f"Minimalism issues: {'; '.join(issues[:2])}"
         return CheckResult("minimalism", passed, score, reason)

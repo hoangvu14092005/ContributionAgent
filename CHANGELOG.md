@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Skills harvesting from agent frameworks**: Adapted high-value workflows, agents, and knowledge references from OpenHands, Haystack, MetaGPT, LangChain, and CrewAI into `.agents/`. 12 new skill markdown files bring the total to **30 skills** across 3 categories
+  - 6 new workflows: `address_pr_comments`, `update_pr_description`, `update_test`, `agent-builder`, `agent_memory`, `add_agent`
+  - 4 new agents: `codereview-roasted` (Linus-style brutal reviewer), `security-patterns`, `code-review-patterns`, `github-ops`
+  - 2 new knowledge files (new `.agents/knowledge/` category): `default-tools`, `onboarding`
+- **`.agents/knowledge/` category** — third tier for reference docs that are not role personas or procedural workflows
+- **`SkillLoader` Python module** (`contribai/agents/skill_loader.py`) — parses YAML frontmatter from `.agents/` markdown, exposes `list_all`, `find_by_trigger`, `find_by_name`, `search`, `categories`. Inspired by Haystack's `SkillToolset` progressive-disclosure pattern
+- **`contribai skills` CLI command group** with `list`, `find <query>`, `show <name-or-trigger>` subcommands for programmatic discovery of all skills
+- 32 new unit tests for the `SkillLoader` in `tests/unit/test_skill_loader.py` — covers frontmatter parsing, input normalization, trigger/name lookup, keyword search, error handling on malformed files
+
+### Changed
+- `.agents/agents/` and `.agents/workflows/` are now programmatically discoverable — every existing file is queryable via `contribai skills find`
+
 ## [4.1.0] - 2026-03-29
 
 ### Added

@@ -260,6 +260,119 @@ def hunt(ctx, rounds, delay, language, mode, dry_run, human_review, events_log):
     _print_result(result, dry_run)
 
 
+@cli.group()
+def skills():
+    """Discover and inspect .agents/ skills (agents, workflows, knowledge)."""
+
+
+@skills.command("list")
+@click.option(
+    "--category",
+    "-c",
+    type=click.Choice(["agent", "workflow", "knowledge"]),
+    default=None,
+    help="Filter by category",
+)
+@click.option("--has-trigger", is_flag=True, help="Show only skills with a trigger")
+@click.pass_context
+def skills_list(ctx, category, has_trigger):
+    """List all skills discovered under .agents/."""
+    from contribai.agents.skill_loader import load_default_loader
+
+    loader = load_default_loader()
+    all_skills = loader.list_all()
+
+    if category:
+        all_skills = [s for s in all_skills if s.category == category]
+    if has_trigger:
+        all_skills = [s for s in all_skills if s.has_trigger]
+
+    if not all_skills:
+        console.print("[yellow]No skills found.[/yellow]")
+        return
+
+    table = Table(title=f"Skills ({len(all_skills)})", show_lines=False)
+    table.add_column("Category", style="cyan")
+    table.add_column("Trigger", style="green")
+    table.add_column("Name", style="bold")
+    table.add_column("Description", max_width=60)
+
+    for skill in sorted(all_skills, key=lambda s: (s.category, s.name)):
+        table.add_row(
+            skill.category,
+            skill.trigger or "—",
+            skill.name,
+            skill.description,
+        )
+
+    console.print(table)
+    cats = loader.categories()
+    console.print(
+        f"\n[dim]Counts: agents={cats['agent']}  workflows={cats['workflow']}  "
+        f"knowledge={cats['knowledge']}[/dim]"
+    )
+
+
+@skills.command("find")
+@click.argument("query")
+@click.pass_context
+def skills_find(ctx, query):
+    """Search skills by keyword (matches name, description, body)."""
+    from contribai.agents.skill_loader import load_default_loader
+
+    loader = load_default_loader()
+    matches = loader.search(query)
+    if not matches:
+        console.print(f"[yellow]No skills match '{query}'.[/yellow]")
+        return
+
+    table = Table(title=f"Matches for '{query}'")
+    table.add_column("Category", style="cyan")
+    table.add_column("Trigger", style="green")
+    table.add_column("Name", style="bold")
+    table.add_column("File", style="dim")
+    for skill in matches:
+        try:
+            rel = str(skill.file_path.relative_to(loader.agents_dir.parent))
+        except ValueError:
+            rel = str(skill.file_path)
+        table.add_row(skill.category, skill.trigger or "—", skill.name, rel)
+    console.print(table)
+
+
+@skills.command("show")
+@click.argument("name_or_trigger")
+@click.pass_context
+def skills_show(ctx, name_or_trigger):
+    """Show a skill's full body. Accepts name or trigger like /address_pr_comments."""
+    from contribai.agents.skill_loader import load_default_loader
+
+    loader = load_default_loader()
+    skill = (
+        loader.find_by_trigger(name_or_trigger)
+        or loader.find_by_name(name_or_trigger)
+    )
+    if not skill:
+        console.print(f"[red]Skill not found:[/red] {name_or_trigger}")
+        raise click.exceptions.Exit(code=1)
+
+    header = f"{skill.name}"
+    if skill.trigger:
+        header += f"  [green]{skill.trigger}[/green]"
+    header += f"  [dim]({skill.category})[/dim]"
+    console.print(Panel(header, border_style="cyan"))
+
+    if skill.description:
+        console.print(f"[bold]Description:[/bold] {skill.description}\n")
+    if skill.inputs:
+        console.print("[bold]Inputs:[/bold]")
+        for inp in skill.inputs:
+            opt = "" if inp.required else " (optional)"
+            console.print(f"  • {inp.name}: {inp.type}{opt} — {inp.description}")
+        console.print()
+    console.print(skill.body)
+
+
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Show pending feedback without responding")
 @click.option("--pr", "pr_number", type=int, default=None, help="Check a specific PR number only")

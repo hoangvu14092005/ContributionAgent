@@ -40,3 +40,18 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Claude agent specs (do NOT commit agent workflow files)
+.agents/
+
+# Repomix auto-generated snapshots
+repomix-output.xml
+
+# Submodule outer markers
+external/.last_refresh.txt
+
+# Allow subfolder structure files inside external/
+!external/.gitkeep
+!external/README.md
+!external/scripts/
+!external/notes/
