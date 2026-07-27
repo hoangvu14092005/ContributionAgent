@@ -1,0 +1,40 @@
+[submodule "external/repos/openhands"]
+	path = external/repos/openhands
+	url = https://github.com/All-Hands-AI/OpenHands.git
+	branch = main
+	shallow = true
+[submodule "external/repos/metagpt"]
+	path = external/repos/metagpt
+	url = https://github.com/geekan/MetaGPT.git
+	branch = main
+	shallow = true
+[submodule "external/repos/haystack"]
+	path = external/repos/haystack
+	url = https://github.com/deepset-ai/haystack.git
+	branch = main
+	shallow = true
+[submodule "external/repos/langchain"]
+	path = external/repos/langchain
+	url = https://github.com/langchain-ai/langchain.git
+	branch = main
+	shallow = true
+[submodule "external/repos/autogen"]
+	path = external/repos/autogen
+	url = https://github.com/microsoft/autogen.git
+	branch = main
+	shallow = true
+[submodule "external/repos/crewai"]
+	path = external/repos/crewai
+	url = https://github.com/crewAIInc/crewAI.git
+	branch = main
+	shallow = true
+[submodule "external/repos/llamaindex"]
+	path = external/repos/llamaindex
+	url = https://github.com/run-llama/llama_index.git
+	branch = main
+	shallow = true
+[submodule "external/repos/swe-agent"]
+	path = external/repos/swe-agent
+	url = https://github.com/princeton-nlp/SWE-agent.git
+	branch = main
+	shallow = true

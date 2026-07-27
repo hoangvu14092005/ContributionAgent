@@ -227,7 +227,12 @@ class StyleValidator:
         score = 10.0
 
         # Count functions with docstrings
-        functions_with_docs = len(re.findall(r'def \w+\([^)]*\):[^"\']*["\']{{3}}', code))
+        # Layer A fix: handles functions with optional return type annotation
+        # (e.g. `def foo(x) -> int:"""..."""`).
+        docstring_re = re.compile(
+            r'def \w+\([^)]*\)(?:\s*->\s*[^:]+)?:\s*["\']{3}'
+        )
+        functions_with_docs = len(docstring_re.findall(code))
         total_functions = len(re.findall(r"def \w+\(", code))
 
         if total_functions > 0:

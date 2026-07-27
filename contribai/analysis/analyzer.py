@@ -26,6 +26,7 @@ from contribai.core.models import (
     Repository,
     Severity,
 )
+from contribai.core.text_utils import strip_think_blocks
 from contribai.github.client import GitHubClient
 from contribai.llm.provider import LLMProvider
 
@@ -528,8 +529,9 @@ class CodeAnalyzer:
             "5. COSMETIC — Is this purely stylistic with no functional impact? "
             "(e.g., prefer f-strings over .format()). If yes, do NOT report.\n\n"
             "Report ONLY issues that a senior developer would actually fix in a PR review. "
-            "Quality over quantity — 1 genuine finding beats 5 false positives.\n"
-            "Maximum 3 findings per analyzer."
+            "Quality over quantity — but don't be too conservative: real bugs, missing error "
+            "handling, race conditions, and security issues should ALL be reported.\n"
+            "Maximum 5 findings per analyzer (relaxed from 3)."
         )
 
         try:
@@ -747,6 +749,12 @@ class CodeAnalyzer:
             "testing": ContributionType.CODE_QUALITY,
         }
         contrib_type = type_map.get(analyzer_name, ContributionType.CODE_QUALITY)
+
+        # Strip `` blocks (MiniMax-M3 and similar models prepend reasoning)
+        # Layer A: consolidated into contribai.core.text_utils (was inline duplicate in 4 files)
+        from contribai.core.text_utils import strip_think_blocks
+
+        response = strip_think_blocks(response)
 
         try:
             # Try JSON first (more reliable for complex strings)

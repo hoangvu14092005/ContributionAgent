@@ -20,6 +20,7 @@ from contribai.core.models import (
     Repository,
     Severity,
 )
+from contribai.core.text_utils import strip_think_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -591,6 +592,9 @@ SUGGESTION: <specific implementation details>
         default_type: ContributionType,
     ) -> list[Finding]:
         """Parse LLM response with multiple ---FILE--- blocks."""
+        # Layer A: think-strip consolidated into contribai.core.text_utils
+        response = strip_think_blocks(response)
+
         findings: list[Finding] = []
         blocks = re.split(r"---FILE---", response)
 

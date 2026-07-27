@@ -15,6 +15,7 @@ from contribai.core.models import (
     FeedbackItem,
     PatrolResult,
 )
+from contribai.core.text_utils import strip_think_blocks
 from contribai.github.client import GitHubClient
 from contribai.llm.provider import LLMProvider
 
@@ -452,6 +453,9 @@ class PRPatrol:
     def _parse_classifications(self, response: str, feedback: list[dict]) -> list[FeedbackItem]:
         """Parse LLM YAML response into FeedbackItems."""
         items = []
+
+        # Layer A: think-strip consolidated into contribai.core.text_utils
+        response = strip_think_blocks(response)
 
         # Extract YAML block
         text = response

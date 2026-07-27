@@ -251,8 +251,14 @@ Any style mismatch will result in rejection.
         function_count = 0
 
         for content in files.values():
-            # Count docstrings (triple quotes after def)
-            docstring_count += len(re.findall(r'def \w+\([^)]*\):[^"\']*["\']{{3}}', content))
+            # Count docstrings (triple quotes after def).
+            # Layer A fix: handles functions with optional return type annotation.
+            docstring_count += len(
+                re.findall(
+                    r'def \w+\([^)]*\)(?:\s*->\s*[^:]+)?:\s*["\']{3}',
+                    content,
+                )
+            )
             # Count all functions
             function_count += len(re.findall(r"def \w+\(", content))
 

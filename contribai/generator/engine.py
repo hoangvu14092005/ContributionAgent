@@ -20,7 +20,10 @@ from contribai.core.models import (
     FileChange,
     Finding,
     RepoContext,
+    Repository,
+    Severity,
 )
+from contribai.core.text_utils import strip_think_blocks
 from contribai.generator.style_validator import StyleValidator
 from contribai.llm.context import build_repo_context_prompt
 from contribai.llm.provider import LLMProvider
@@ -105,19 +108,20 @@ class ContributionGenerator:
                 )
 
                 # Quick validation: check if response looks like valid JSON
-                response_stripped = response.strip()
-                
+                # Layer A: think-strip consolidated into contribai.core.text_utils
+                response_stripped = strip_think_blocks(response)
+
                 # Strip markdown code fences if present
                 if response_stripped.startswith('```json'):
                     response_stripped = response_stripped[7:]  # Remove ```json
                 elif response_stripped.startswith('```'):
                     response_stripped = response_stripped[3:]  # Remove ```
-                
+
                 if response_stripped.endswith('```'):
                     response_stripped = response_stripped[:-3]  # Remove trailing ```
-                
+
                 response_stripped = response_stripped.strip()
-                
+
                 if not response_stripped.startswith('{'):
                     last_error = (
                         "Response does not start with '{'. "
@@ -1043,11 +1047,16 @@ class ContributionGenerator:
         """Robustly extract JSON from LLM response.
 
         Tries multiple strategies to handle common LLM quirks:
+        0. Strip `` blocks (some models like MiniMax-M3 prepend thinking)
         1. Extract from ```json fences
         2. Find raw JSON with "changes" key
         3. Strip trailing text after valid JSON
         4. Sanitize control characters in string values
         """
+        # Strategy 0: Strip `` blocks via shared utility
+        # (consolidated in contribai.core.text_utils — was inline duplicate)
+        response = strip_think_blocks(response)
+
         # Strategy 1: ```json blocks
         json_match = re.search(r"```json\s*\n(.*?)\n\s*```", response, re.DOTALL)
         if json_match:
@@ -1071,24 +1080,24 @@ class ContributionGenerator:
         in_string = False
         escape_next = False
         end = start
-        
+
         for i in range(start, len(response)):
             char = response[i]
-            
+
             # Handle escape sequences
             if escape_next:
                 escape_next = False
                 continue
-            
+
             if char == '\\':
                 escape_next = True
                 continue
-            
+
             # Track string boundaries
             if char == '"':
                 in_string = not in_string
                 continue
-            
+
             # Only count brackets outside of strings
             if not in_string:
                 if char == "{":
