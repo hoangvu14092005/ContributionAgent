@@ -5,7 +5,7 @@ Checklist này bám theo plan canonical tại docs/superpowers/plans/2026-08-07-
 ## Phase 0 — Live safety
 
 - [x] Task 0: Reconcile baseline và Layer C local.
-- [ ] Task 1: Capability model và PolicyEngine.
+- [x] Task 1: Capability model và PolicyEngine.
 - [ ] Task 2: PublishPermit, GitHubPublisher và idempotency.
 - [ ] Task 3: Explicit execution mode, auth fail-closed và webhook an toàn.
 - [ ] Task 4: Gộp Human Review và khóa issue side effects.
