@@ -8,7 +8,11 @@ import pytest
 
 from contribai.engines.candidates import PatchCandidate
 from contribai.execution.workspaces.base import CommandResult
-from contribai.verification.engine import VerificationEngine, VerificationPlan
+from contribai.verification.engine import (
+    VerificationEngine,
+    VerificationPlan,
+    _default_syntax_command,
+)
 from contribai.verification.models import VerificationStatus
 from contribai.verification.runners import VerificationRunner
 
@@ -55,6 +59,27 @@ def _plan() -> VerificationPlan:
 
 def _ok(command: str) -> CommandResult:
     return CommandResult(command=command, returncode=0, status="VERIFIED")
+
+
+def test_default_baseline_includes_untracked_files() -> None:
+    assert "status --porcelain" in VerificationPlan().baseline_command
+    assert "--untracked-files=all" in VerificationPlan().baseline_command
+
+
+def test_default_python_syntax_check_skips_deleted_files() -> None:
+    candidate = PatchCandidate.from_patch(
+        attempt_id="attempt-delete",
+        base_sha="base-delete",
+        patch="diff --git a/src/old.py b/src/old.py\ndeleted file mode 100644\n",
+        changed_files=("src/old.py", "src/keep.py"),
+        deleted_files=("src/old.py",),
+    )
+
+    command = _default_syntax_command(candidate)
+
+    assert command is not None
+    assert "src/keep.py" in command
+    assert "src/old.py" not in command
 
 
 @pytest.mark.asyncio
