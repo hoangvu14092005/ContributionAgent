@@ -193,6 +193,7 @@ class SchedulerConfig(BaseModel):
     cron: str = "0 */6 * * *"  # every 6 hours
     timezone: str = "UTC"
     max_concurrent: int = 3
+    mode: ExecutionMode = ExecutionMode.SHADOW
 
 
 class WebConfig(BaseModel):

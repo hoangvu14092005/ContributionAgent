@@ -23,6 +23,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 from contribai import __version__
+from contribai.control.command_service import CommandService
+from contribai.control.mode import ExecutionMode
 from contribai.core.config import load_config
 
 # Fix Windows console encoding for emoji/unicode support
@@ -36,6 +38,32 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 console = Console()
+
+
+async def _submit_control_command(
+    config,
+    repo: str,
+    *,
+    issue_number: int | None = None,
+    mode: ExecutionMode,
+    source: str,
+    idempotency_key: str | None = None,
+):
+    """Persist a CLI command before the legacy pipeline continues execution."""
+    from contribai.orchestrator.memory import Memory
+
+    memory = Memory(config.storage.resolved_db_path)
+    await memory.init()
+    try:
+        return await CommandService(memory).submit(
+            repo,
+            issue_number=issue_number,
+            mode=mode,
+            idempotency_key=idempotency_key,
+            metadata={"source": source},
+        )
+    finally:
+        await memory.close()
 
 
 def setup_logging(verbose: bool = False):
@@ -77,6 +105,7 @@ def setup_logging(verbose: bool = False):
 #   [dim]AI Agent for Open Source Contributions v{__version__}[/dim]
 # [/bold cyan]"""
 #     console.print(banner)
+
 
 def print_banner():
     banner = f"""[bold cyan]
@@ -150,6 +179,21 @@ def run(ctx, language, stars, max_prs, dry_run, human_review, events_log):
         console.print(f"   📡 Events log: {events_log}")
     console.print()
 
+    execution_mode = (
+        ExecutionMode.SHADOW
+        if dry_run
+        else (ExecutionMode.REVIEW_ONLY if human_review else ExecutionMode.LIVE)
+    )
+    work_item = asyncio.run(
+        _submit_control_command(
+            config,
+            "contribai/discovery",
+            mode=execution_mode,
+            source="cli.run",
+        )
+    )
+    console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")
+
     from contribai.orchestrator.pipeline import ContribPipeline
 
     pipeline = ContribPipeline(config)
@@ -189,6 +233,21 @@ def target(ctx, url, types, dry_run, human_review):
         config.pipeline.human_review = True
         console.print("   🔍 Human review: [green]ENABLED[/green]")
     console.print()
+
+    execution_mode = (
+        ExecutionMode.SHADOW
+        if dry_run
+        else (ExecutionMode.REVIEW_ONLY if human_review else ExecutionMode.LIVE)
+    )
+    work_item = asyncio.run(
+        _submit_control_command(
+            config,
+            url,
+            mode=execution_mode,
+            source="cli.target",
+        )
+    )
+    console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")
 
     from contribai.orchestrator.pipeline import ContribPipeline
 
@@ -252,6 +311,21 @@ def hunt(ctx, rounds, delay, language, mode, dry_run, human_review, events_log):
     if events_log:
         console.print(f"   📡 Events log: {events_log}")
     console.print()
+
+    execution_mode = (
+        ExecutionMode.SHADOW
+        if dry_run
+        else (ExecutionMode.REVIEW_ONLY if human_review else ExecutionMode.LIVE)
+    )
+    work_item = asyncio.run(
+        _submit_control_command(
+            config,
+            "contribai/discovery",
+            mode=execution_mode,
+            source="cli.hunt",
+        )
+    )
+    console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")
 
     from contribai.orchestrator.pipeline import ContribPipeline
 
@@ -348,10 +422,7 @@ def skills_show(ctx, name_or_trigger):
     from contribai.agents.skill_loader import load_default_loader
 
     loader = load_default_loader()
-    skill = (
-        loader.find_by_trigger(name_or_trigger)
-        or loader.find_by_name(name_or_trigger)
-    )
+    skill = loader.find_by_trigger(name_or_trigger) or loader.find_by_name(name_or_trigger)
     if not skill:
         console.print(f"[red]Skill not found:[/red] {name_or_trigger}")
         raise click.exceptions.Exit(code=1)
@@ -537,7 +608,7 @@ def analyze(ctx, url):
 @click.option("--dry-run", is_flag=True, help="Analyze issues without creating PRs")
 @click.pass_context
 def solve(ctx, url, max_issues, dry_run):
-    """Solve open issues in a specific repository."""
+    """Queue solvable issues in a specific repository for the control plane."""
     print_banner()
 
     config = load_config(ctx.obj["config_path"])
@@ -579,6 +650,24 @@ def solve(ctx, url, max_issues, dry_run):
             if not solvable:
                 console.print("[dim]No solvable issues found.[/dim]")
                 return
+
+            from contribai.orchestrator.memory import Memory
+
+            memory = Memory(config.storage.resolved_db_path)
+            await memory.init()
+            try:
+                commands = CommandService(memory)
+                execution_mode = ExecutionMode.SHADOW if dry_run else ExecutionMode.REVIEW_ONLY
+                for issue in solvable:
+                    item = await commands.submit(
+                        url,
+                        issue_number=issue.number,
+                        mode=execution_mode,
+                        metadata={"source": "cli.solve"},
+                    )
+                    console.print(f"Queued WorkItem {item.id} for issue #{issue.number}")
+            finally:
+                await memory.close()
 
             table = Table(title="🎯 Solvable Issues", show_lines=True)
             table.add_column("#", width=5)

@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
 from fastapi.responses import HTMLResponse
 
 from contribai import __version__
+from contribai.control.command_service import CommandService
 from contribai.control.mode import ExecutionMode
 from contribai.core.config import ContribAIConfig, load_config
 from contribai.orchestrator.memory import Memory
@@ -34,6 +36,34 @@ _config: ContribAIConfig | None = None
 _memory: Memory | None = None
 
 
+async def _submit_control_command(
+    config: ContribAIConfig,
+    repo_url: str | None,
+    mode: ExecutionMode,
+    *,
+    source: str,
+):
+    """Persist an entrypoint command before any legacy pipeline continuation."""
+    memory = _memory
+    owns_memory = False
+    if memory is None:
+        db_path = getattr(getattr(config, "storage", None), "resolved_db_path", None)
+        if not isinstance(db_path, (str, Path)):
+            return None
+        memory = Memory(db_path)
+        await memory.init()
+        owns_memory = True
+    try:
+        return await CommandService(memory).submit(
+            repo_url or "contribai/discovery",
+            mode=mode,
+            metadata={"source": source},
+        )
+    finally:
+        if owns_memory:
+            await memory.close()
+
+
 async def _webhook_event_handler(
     event_type: str,
     action: str,
@@ -46,6 +76,7 @@ async def _webhook_event_handler(
         logger.error("Rejected forbidden live webhook run for %s", repo_url)
         return
     config = load_config()
+    await _submit_control_command(config, repo_url, mode, source="webhook")
     pipeline = ContribPipeline(config)
     try:
         result = await pipeline.run_single(repo_url, dry_run=mode.dry_run)
@@ -153,6 +184,7 @@ async def _background_run(repo_url: str | None, mode: ExecutionMode):
     """Execute pipeline in background."""
     mode = ExecutionMode(mode)
     config = load_config()
+    await _submit_control_command(config, repo_url, mode, source="web.run")
     pipeline = ContribPipeline(config)
     try:
         if repo_url:
@@ -200,6 +232,40 @@ async def trigger_target(
         "status": "started",
         "repo_url": request.repo_url,
         "mode": request.mode,
+    }
+
+
+@app.post("/api/work-items")
+async def submit_work_item(
+    request: RunRequest,
+    presented_key: str | None = Depends(get_presented_api_key),
+):
+    """Submit a durable control-plane WorkItem without running GitHub writes inline."""
+    if request.mode is ExecutionMode.LIVE:
+        require_configured_api_key(presented_key)
+    config = _config or load_config()
+    item = await _submit_control_command(
+        config, request.repo_url, request.mode, source="web.command"
+    )
+    if item is None:
+        raise HTTPException(status_code=503, detail="control plane is not initialized")
+    return {"status": "queued", "work_id": item.id, "repo": item.repo, "mode": item.mode}
+
+
+@app.get("/api/work-items/{work_id}")
+async def get_work_item(work_id: str):
+    """Read one persisted WorkItem snapshot."""
+    if _memory is None:
+        raise HTTPException(status_code=503, detail="control plane is not initialized")
+    item = await CommandService(_memory).get(work_id)
+    return {
+        "work_id": item.id,
+        "repo": item.repo,
+        "issue_number": item.issue_number,
+        "mode": item.mode,
+        "state": item.state,
+        "attempt": item.attempt,
+        "version": item.version,
     }
 
 

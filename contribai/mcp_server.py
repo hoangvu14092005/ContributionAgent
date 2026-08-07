@@ -17,6 +17,8 @@ import mcp.types as types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+from contribai.control.command_service import CommandService
+from contribai.control.mode import ExecutionMode
 from contribai.core.config import load_config
 from contribai.core.exceptions import GitHubAPIError
 from contribai.github.client import GitHubClient
@@ -45,6 +47,11 @@ async def get_memory() -> Memory:
         _memory = Memory(_config.storage.resolved_db_path)
         await _memory.init()
     return _memory
+
+
+async def get_commands() -> CommandService:
+    """Return the shared command boundary backed by MCP's local database."""
+    return CommandService(await get_memory())
 
 
 def _ok(**kwargs: Any) -> list[types.TextContent]:
@@ -248,6 +255,29 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
+            name="submit_work",
+            description="Queue a contribution WorkItem through the control plane",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string"},
+                    "issue_number": {"type": "integer"},
+                    "mode": {"type": "string", "enum": ["shadow", "review_only", "live"]},
+                    "idempotency_key": {"type": "string"},
+                },
+                "required": ["repo"],
+            },
+        ),
+        types.Tool(
+            name="get_work_item",
+            description="Read a persisted contribution WorkItem",
+            inputSchema={
+                "type": "object",
+                "properties": {"work_id": {"type": "string"}},
+                "required": ["work_id"],
+            },
+        ),
+        types.Tool(
             name="patrol_prs",
             description=(
                 "Collect raw review comments from open PRs for Claude to classify and act on"
@@ -304,6 +334,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return await _check_ai_policy(arguments)
         elif name == "get_stats":
             return await _get_stats(arguments)
+        elif name == "submit_work":
+            return await _submit_work(arguments)
+        elif name == "get_work_item":
+            return await _get_work_item(arguments)
         elif name == "patrol_prs":
             return await _patrol_prs(arguments)
         elif name == "cleanup_forks":
@@ -377,6 +411,33 @@ async def _get_open_issues(args: dict) -> list[types.TextContent]:
             {"number": i.number, "title": i.title, "body": i.body, "labels": i.labels}
             for i in issues
         ]
+    )
+
+
+async def _submit_work(args: dict) -> list[types.TextContent]:
+    """Queue a command; MCP never receives a GitHub write client for this path."""
+    commands = await get_commands()
+    item = await commands.submit(
+        args["repo"],
+        issue_number=args.get("issue_number"),
+        mode=ExecutionMode(args.get("mode", ExecutionMode.SHADOW)),
+        idempotency_key=args.get("idempotency_key"),
+        metadata={"source": "mcp.submit_work"},
+    )
+    return _ok(status="queued", work_id=item.id, repo=item.repo, mode=item.mode)
+
+
+async def _get_work_item(args: dict) -> list[types.TextContent]:
+    """Read one WorkItem snapshot through the same command service."""
+    item = await (await get_commands()).get(args["work_id"])
+    return _ok(
+        work_id=item.id,
+        repo=item.repo,
+        issue_number=item.issue_number,
+        mode=item.mode,
+        state=item.state,
+        attempt=item.attempt,
+        version=item.version,
     )
 
 
