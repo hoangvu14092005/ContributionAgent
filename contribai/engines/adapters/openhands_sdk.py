@@ -77,7 +77,7 @@ class OpenHandsSDKDriver(ExternalEngineDriver):
             workspace=workspace,
             workspace_path=workspace.path,
             prompt=prompt,
-            workspace_backend="outer",
+            workspace_backend="local",
             sandbox_mode="outer",
             use_docker=False,
         )
@@ -114,7 +114,7 @@ class OpenHandsSDKDriver(ExternalEngineDriver):
         )
 
     def _factory_from_explicit_module(self) -> Callable[..., object] | None:
-        """Build a factory only from a module object explicitly supplied by deployment code."""
+        """Build a factory only from a module explicitly supplied by deployment code."""
         module = self._sdk_module
         if module is None:
             return None
