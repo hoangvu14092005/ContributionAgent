@@ -12,11 +12,7 @@ from contribai.github.client import GitHubClient, _issue_github_write_authority
 from contribai.github.guidelines import adapt_pr_body
 from contribai.pr.manager import PRManager
 from contribai.publishing.capability import GITHUB_PUBLISHER_ACTOR, Capability, CapabilityRequest
-from contribai.publishing.idempotency import (
-    IdempotencyKey,
-    IdempotencyStore,
-    InMemoryIdempotencyStore,
-)
+from contribai.publishing.idempotency import IdempotencyKey, IdempotencyStore
 from contribai.publishing.permit import (
     PublishCandidate,
     PublishPermit,
@@ -40,12 +36,12 @@ class GitHubPublisher:
         github: GitHubClient,
         policy_engine: PolicyEngine,
         *,
-        idempotency_store: IdempotencyStore | None = None,
+        idempotency_store: IdempotencyStore[PRResult],
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._github = github
         self._policy_engine = policy_engine
-        self._idempotency_store = idempotency_store or InMemoryIdempotencyStore()
+        self._idempotency_store = idempotency_store
         self._clock = clock or (lambda: datetime.now(UTC))
         self._pr_manager = PRManager(github)
         self.__write_authority = _issue_github_write_authority(github, self)
