@@ -6,7 +6,7 @@ ROOT = Path('.')
 def replace_once(path: str, old: str, new: str) -> None:
     p = ROOT / path
     s = p.read_text(encoding='utf-8')
-    if new in s:
+    if new and new in s:
         return
     if old not in s:
         raise RuntimeError(f'missing expected snippet in {path}: {old[:80]!r}')
