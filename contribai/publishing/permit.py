@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 from contribai.core.models import Contribution, Repository
@@ -44,57 +45,33 @@ class PublishPermit:
 
 
 class PublishCandidate(Protocol):
-    """Minimal payload consumed by the publishing layer.
-
-    Task 10C can adapt its future PatchCandidate to this protocol without making
-    GitHubPublisher depend on engine or workspace internals.
-    """
+    """Minimal payload consumed by the publishing layer."""
 
     @property
-    def contribution(self) -> Contribution:
-        """Return an isolated copy of the snapshotted contribution."""
-        ...
+    def contribution(self) -> Contribution: ...
 
     @property
-    def target_repo(self) -> Repository:
-        """Return an isolated copy of the canonically bound repository."""
-        ...
+    def target_repo(self) -> Repository: ...
 
     @property
-    def base_sha(self) -> str:
-        """Return the exact base commit bound to the candidate."""
-        ...
+    def base_sha(self) -> str: ...
 
     @property
-    def patch_sha256(self) -> str:
-        """Return the trusted hash derived from the ordered file-change payload."""
-        ...
+    def patch_sha256(self) -> str: ...
 
     @property
-    def guidelines(self) -> Any | None:
-        """Return isolated contribution guidelines, if any."""
-        ...
+    def guidelines(self) -> Any | None: ...
 
     @property
-    def closes_issue(self) -> int | None:
-        """Return the already-linked issue number, if any."""
-        ...
+    def closes_issue(self) -> int | None: ...
 
     @property
-    def repo(self) -> str:
-        """Return the canonical ``owner/name`` repository identity."""
-        ...
+    def repo(self) -> str: ...
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class ContributionPublishCandidate:
-    """Immutable adapter from today's Contribution to the publishing protocol.
-
-    The adapter snapshots the current models and derives the fingerprint inside
-    the publishing layer. Task 10C can implement the same PublishCandidate
-    protocol from its future PatchCandidate without coupling this publisher to
-    engine or workspace internals.
-    """
+    """Immutable adapter from today's Contribution to the publishing protocol."""
 
     _contribution_json: str
     _target_repo_json: str
@@ -113,6 +90,13 @@ class ContributionPublishCandidate:
         guidelines: Any | None = None,
         closes_issue: int | None = None,
     ) -> None:
+        if not base_sha or not base_sha.strip():
+            raise PublishCandidateError("base_sha must be non-empty")
+        if closes_issue is not None and (
+            isinstance(closes_issue, bool) or not isinstance(closes_issue, int) or closes_issue <= 0
+        ):
+            raise PublishCandidateError("closes_issue must be a positive integer")
+
         contribution_snapshot = contribution.model_copy(deep=True)
         target_repo_snapshot = target_repo.model_copy(deep=True)
         owner = target_repo_snapshot.owner
@@ -125,6 +109,19 @@ class ContributionPublishCandidate:
             raise PublishCandidateError(
                 "target_repo full_name must equal the canonical owner/name identity"
             )
+
+        all_changes = [*contribution_snapshot.changes, *contribution_snapshot.tests_added]
+        seen_paths: set[str] = set()
+        for change in all_changes:
+            path = str(change.path).replace("\\", "/")
+            pure = PurePosixPath(path)
+            if not path or pure.is_absolute() or ".." in pure.parts:
+                raise PublishCandidateError(f"file change path is outside the repository: {path}")
+            if path in seen_paths:
+                raise PublishCandidateError(f"duplicate file change path: {path}")
+            seen_paths.add(path)
+            if change.is_new_file and change.is_deleted:
+                raise PublishCandidateError(f"file cannot be both new and deleted: {path}")
 
         patch_payload = {
             "changes": [
@@ -141,17 +138,9 @@ class ContributionPublishCandidate:
             ensure_ascii=False,
         ).encode("utf-8")
 
-        object.__setattr__(
-            self,
-            "_contribution_json",
-            contribution_snapshot.model_dump_json(),
-        )
-        object.__setattr__(
-            self,
-            "_target_repo_json",
-            target_repo_snapshot.model_dump_json(),
-        )
-        object.__setattr__(self, "_base_sha", base_sha)
+        object.__setattr__(self, "_contribution_json", contribution_snapshot.model_dump_json())
+        object.__setattr__(self, "_target_repo_json", target_repo_snapshot.model_dump_json())
+        object.__setattr__(self, "_base_sha", base_sha.strip())
         object.__setattr__(self, "_patch_sha256", hashlib.sha256(encoded_payload).hexdigest())
         object.__setattr__(self, "_repo", canonical_repo)
         object.__setattr__(self, "_guidelines", copy.deepcopy(guidelines))
@@ -170,35 +159,28 @@ class ContributionPublishCandidate:
 
     @property
     def contribution(self) -> Contribution:
-        """Return an isolated copy of the snapshotted contribution."""
         return Contribution.model_validate_json(self._contribution_json)
 
     @property
     def target_repo(self) -> Repository:
-        """Return an isolated copy of the snapshotted target repository."""
         return Repository.model_validate_json(self._target_repo_json)
 
     @property
     def base_sha(self) -> str:
-        """Return the exact base commit bound into the candidate."""
         return self._base_sha
 
     @property
     def patch_sha256(self) -> str:
-        """Return SHA-256 of the canonical ordered file-change payload."""
         return self._patch_sha256
 
     @property
     def guidelines(self) -> Any | None:
-        """Return an isolated copy of contribution guidelines."""
         return copy.deepcopy(self._guidelines)
 
     @property
     def closes_issue(self) -> int | None:
-        """Return the already-linked issue number, if any."""
         return self._closes_issue
 
     @property
     def repo(self) -> str:
-        """Return the target repository bound into the fingerprint."""
         return self._repo
