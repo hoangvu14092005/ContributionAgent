@@ -12,6 +12,7 @@ import logging
 import re
 from enum import StrEnum
 
+from contribai.context.context import ContributionContext
 from contribai.core.models import (
     ContributionType,
     Finding,
@@ -342,7 +343,7 @@ class IssueSolver:
         self,
         issue: Issue,
         repo: Repository,
-        context: RepoContext,
+        context: RepoContext | ContributionContext,
     ) -> Finding | None:
         """Convert a GitHub issue into a Finding for the generator.
 
@@ -357,6 +358,8 @@ class IssueSolver:
         Returns:
             Finding object that can be fed to the ContributionGenerator.
         """
+        if isinstance(context, ContributionContext):
+            context = context.to_repo_context()
         category = self.classify_issue(issue)
         contrib_type = CATEGORY_TO_CONTRIB.get(category, ContributionType.CODE_QUALITY)
 
@@ -439,7 +442,7 @@ SUGGESTION: <specific implementation suggestion>
         self,
         issue: Issue,
         repo: Repository,
-        context: RepoContext,
+        context: RepoContext | ContributionContext,
     ) -> list[Finding]:
         """Deep multi-file issue solving with codebase understanding.
 
@@ -461,6 +464,8 @@ SUGGESTION: <specific implementation suggestion>
         Returns:
             List of Finding objects for multi-file changes.
         """
+        if isinstance(context, ContributionContext):
+            context = context.to_repo_context()
         category = self.classify_issue(issue)
         contrib_type = CATEGORY_TO_CONTRIB.get(category, ContributionType.CODE_QUALITY)
 

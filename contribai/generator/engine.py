@@ -13,6 +13,7 @@ import logging
 import re
 from datetime import UTC, datetime
 
+from contribai.context.context import ContributionContext
 from contribai.core.config import ContributionConfig
 from contribai.core.models import (
     Contribution,
@@ -43,7 +44,7 @@ class ContributionGenerator:
     async def generate(
         self,
         finding: Finding,
-        context: RepoContext,
+        context: RepoContext | ContributionContext,
         *,
         guidelines=None,
     ) -> Contribution | None:
@@ -56,6 +57,8 @@ class ContributionGenerator:
         4. Generate commit message
         5. Self-review the generated code
         """
+        if isinstance(context, ContributionContext):
+            context = context.to_repo_context()
         try:
             # 1 & 2: Generate the fix (with retry on failure)
             repo_prefs = await self._get_repo_preferences(context)

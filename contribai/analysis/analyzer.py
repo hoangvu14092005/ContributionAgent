@@ -16,6 +16,7 @@ from fnmatch import fnmatch
 
 from contribai.analysis.context_compressor import ContextCompressor
 from contribai.analysis.repo_conventions import RepoConventions
+from contribai.context.context import ContributionContext
 from contribai.core.config import AnalysisConfig
 from contribai.core.models import (
     AnalysisResult,
@@ -82,7 +83,7 @@ class CodeAnalyzer:
             max_context_tokens=getattr(config, "max_context_tokens", 30_000)
         )
 
-    async def analyze(self, repo: Repository) -> AnalysisResult:
+    async def analyze(self, repo: Repository | ContributionContext) -> AnalysisResult:
         """Run full analysis on a repository.
 
         1. Fetch file tree
@@ -90,6 +91,9 @@ class CodeAnalyzer:
         3. Run enabled analyzers in parallel
         4. Aggregate and deduplicate findings
         """
+        if isinstance(repo, ContributionContext):
+            return await self._analyze_contribution_context(repo)
+
         start = time.monotonic()
 
         # Fetch file tree
@@ -138,6 +142,35 @@ class CodeAnalyzer:
         duration = time.monotonic() - start
         return AnalysisResult(
             repo=repo,
+            findings=findings,
+            analyzed_files=len(analyzable),
+            skipped_files=len(file_tree) - len(analyzable),
+            analysis_duration_sec=round(duration, 2),
+        )
+
+    async def _analyze_contribution_context(
+        self,
+        contribution_context: ContributionContext,
+    ) -> AnalysisResult:
+        """Analyze an already-built context without fetching a competing one."""
+        start = time.monotonic()
+        context = contribution_context.to_repo_context()
+        file_tree = context.file_tree
+        analyzable = self._select_files(file_tree)
+        analyzer_tasks = [
+            self._run_analyzer(name, context) for name in self._config.enabled_analyzers
+        ]
+        results = await asyncio.gather(*analyzer_tasks, return_exceptions=True)
+        all_findings: list[Finding] = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("Analyzer failed: %s", result)
+            elif isinstance(result, list):
+                all_findings.extend(result)
+        findings = self._filter_severity(self._deduplicate(all_findings))
+        duration = time.monotonic() - start
+        return AnalysisResult(
+            repo=contribution_context.repo,
             findings=findings,
             analyzed_files=len(analyzable),
             skipped_files=len(file_tree) - len(analyzable),
@@ -500,7 +533,7 @@ class CodeAnalyzer:
             )
 
         # v4.0: Inject repo intelligence + PR history if available
-        repo_intel_ctx = getattr(context, "_repo_intel_context", "")
+        repo_intel_ctx = context.repo_intelligence
         if repo_intel_ctx:
             profile_ctx += f"\n{repo_intel_ctx}\n"
 
