@@ -7,8 +7,11 @@ intelligent task-to-model routing.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,76 @@ class TaskType(StrEnum):
     BULK = "bulk"  # High-volume, low-complexity
     PLANNING = "planning"  # Architecture, strategy
     MULTIMODAL = "multimodal"  # Image/UI analysis
+
+
+def _freeze_payload(value: Any) -> Any:
+    """Deep-copy a JSON-like payload into immutable containers."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_payload(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_payload(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return frozenset(_freeze_payload(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class LLMRequest:
+    """Immutable, request-scoped LLM routing and execution contract."""
+
+    task: TaskType
+    provider: str
+    model: str
+    messages: tuple[Mapping[str, Any], ...]
+    timeout_sec: float
+    max_tokens: int
+    credential_scope: str | None = None
+    response_schema: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if not str(self.provider).strip() or not str(self.model).strip():
+            raise ValueError("LLMRequest provider and model must be non-empty")
+        if self.timeout_sec <= 0:
+            raise ValueError("LLMRequest timeout_sec must be positive")
+        if self.max_tokens <= 0:
+            raise ValueError("LLMRequest max_tokens must be positive")
+        frozen_messages = _freeze_payload(self.messages)
+        if not isinstance(frozen_messages, tuple):
+            raise TypeError("LLMRequest messages must be a sequence")
+        object.__setattr__(self, "task", TaskType(self.task))
+        object.__setattr__(self, "provider", str(self.provider))
+        object.__setattr__(self, "model", str(self.model))
+        object.__setattr__(self, "messages", frozen_messages)
+        if self.response_schema is not None:
+            frozen_schema = _freeze_payload(self.response_schema)
+            if not isinstance(frozen_schema, MappingProxyType):
+                raise TypeError("LLMRequest response_schema must be a mapping")
+            object.__setattr__(self, "response_schema", frozen_schema)
+
+    @classmethod
+    def from_messages(
+        cls,
+        *,
+        task: TaskType,
+        provider: str,
+        model: str,
+        messages: list[dict[str, str]] | tuple[Mapping[str, Any], ...],
+        timeout_sec: float,
+        max_tokens: int,
+        credential_scope: str | None = None,
+        response_schema: Mapping[str, Any] | None = None,
+    ) -> LLMRequest:
+        """Construct a request while preserving a convenient list-based API."""
+        return cls(
+            task=task,
+            provider=provider,
+            model=model,
+            messages=tuple(messages),
+            timeout_sec=timeout_sec,
+            max_tokens=max_tokens,
+            credential_scope=credential_scope,
+            response_schema=response_schema,
+        )
 
 
 class ModelTier(StrEnum):
