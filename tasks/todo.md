@@ -35,7 +35,7 @@ Checklist này bám theo plan canonical tại docs/superpowers/plans/2026-08-07-
 - [x] Task 12: OpportunityEngine và Issue-first orchestration.
 - [x] Task 13: Persistent ReviewService và dynamic PR review context.
 - [x] Task 14: CommandService và gom entrypoints.
-- [ ] Checkpoint 3: Safe end-to-end shadow/review/live flow.
+- [x] Checkpoint 3: Safe end-to-end shadow/review/live flow.
 
 ## Phase 4 — Optional expansion
 
