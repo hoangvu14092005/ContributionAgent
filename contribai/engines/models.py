@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from collections.abc import Mapping
@@ -16,6 +17,7 @@ from contribai.context.rules import RepoRules, ResolvedRepoRules
 from contribai.execution.budget import ExecutionBudget
 from contribai.execution.credentials import CredentialLease
 from contribai.execution.trajectory import ExecutionEvent
+from contribai.execution.workspaces.base import Workspace
 from contribai.localization.models import ContributionTask
 from contribai.publishing.policy import CapabilityPolicy
 
@@ -85,6 +87,8 @@ class ExecutionLease:
     budget: ExecutionBudget
     credential_lease: CredentialLease | None = field(default=None, repr=False)
     expires_at: datetime | None = None
+    workspace: Workspace | None = field(default=None, repr=False, compare=False)
+    cancel_event: asyncio.Event | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.work_id.strip() or not self.attempt_id.strip():
@@ -93,6 +97,25 @@ class ExecutionLease:
             raise ValueError("execution lease requires a workspace reference")
         if self.expires_at and self.expires_at.tzinfo is None:
             raise ValueError("execution lease expiry must be timezone-aware")
+
+    def is_expired(self, now: datetime | None = None) -> bool:
+        """Return whether this lease can no longer be used."""
+        if self.expires_at is None:
+            return False
+        current = now or datetime.now(self.expires_at.tzinfo)
+        return current >= self.expires_at
+
+    def assert_active(self) -> None:
+        """Fail closed when the lease or its budget is no longer usable."""
+        if self.is_expired():
+            raise EngineBoundaryError("execution lease has expired")
+        if self.budget.exhausted:
+            raise EngineBoundaryError("execution budget is exhausted")
+
+    @property
+    def cancelled(self) -> bool:
+        """Return the cooperative cancellation flag, when one is supplied."""
+        return self.cancel_event.is_set() if self.cancel_event else False
 
 
 @dataclass(frozen=True, slots=True)
