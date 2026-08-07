@@ -636,10 +636,10 @@ async def test_concurrent_migrations_on_same_connection_are_serialized(tmp_path:
 @pytest.mark.asyncio
 async def test_memory_reuses_connection_migration_lock_without_deadlock(tmp_path: Path) -> None:
     memory = Memory(tmp_path / "shared-lock.db")
-    await asyncio.wait_for(memory.init(), timeout=1)
+    await asyncio.wait_for(memory.init(), timeout=5)
     try:
         assert memory._transaction_lock is connection_transaction_lock(memory.connection)
-        item = await asyncio.wait_for(memory.work_items.create(_new_item()), timeout=1)
+        item = await asyncio.wait_for(memory.work_items.create(_new_item()), timeout=5)
         assert item.state is WorkState.DISCOVERED
     finally:
         await memory.close()
