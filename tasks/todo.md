@@ -21,8 +21,8 @@ Checklist này bám theo plan canonical tại docs/superpowers/plans/2026-08-07-
 
 ## Phase 2 — Coding quality
 
-- [ ] Task 8: ContributionContext, RepoRules và ContextEngine.
-- [ ] Task 9: Hierarchical localization.
+- [x] Task 8: ContributionContext, RepoRules và ContextEngine.
+- [x] Task 9: Hierarchical localization.
 - [ ] Task 10A: Engine runtime contract (`EngineDriver`/`EngineOutcome`).
 - [ ] Task 10B: EngineRouter và `NativeEngineDriver`.
 - [ ] Task 10C: `PatchCollector` và candidate assembly.
