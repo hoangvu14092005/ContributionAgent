@@ -23,7 +23,14 @@ def reset_auth():
 def _post(path: str, payload: dict, *, api_key: str | None = None):
     headers = {"X-API-Key": api_key} if api_key else {}
     background_run = AsyncMock()
-    with patch("contribai.web.server._background_run", background_run):
+    queued_item = MagicMock(id="work-queued")
+    with (
+        patch("contribai.web.server._background_run", background_run),
+        patch(
+            "contribai.web.server._submit_control_command",
+            AsyncMock(return_value=queued_item),
+        ),
+    ):
         response = TestClient(app).post(path, json=payload, headers=headers)
     return response, background_run
 
@@ -78,8 +85,12 @@ def test_live_accepts_valid_api_key():
     response, background_run = _post("/api/run", {"mode": "live"}, api_key="valid-key")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "started", "mode": "live"}
-    assert background_run.await_args.args == (None, "live")
+    assert response.json() == {
+        "status": "queued",
+        "mode": "live",
+        "work_id": "work-queued",
+    }
+    background_run.assert_not_awaited()
 
 
 def test_target_run_binds_repo_and_mode_from_json_body():
@@ -117,7 +128,7 @@ def test_legacy_dry_run_body_is_rejected():
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "expected_dry_run"),
-    [("shadow", True), ("review_only", True), ("live", False)],
+    [("shadow", True), ("review_only", True)],
 )
 async def test_background_run_maps_mode_to_pipeline_dry_run(mode: str, expected_dry_run: bool):
     pipeline = MagicMock()
@@ -143,3 +154,28 @@ def test_dashboard_only_sends_explicit_safe_modes():
     assert "triggerRun('live')" not in html
     assert "JSON.stringify({mode: mode})" in html
     assert "dry_run" not in html
+
+
+def test_live_rejects_api_key_in_query_string():
+    configure_auth(["valid-key"])
+    response, background_run = _post("/api/run?api_key=valid-key", {"mode": "live"})
+    assert response.status_code == 401
+    background_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_background_live_queues_without_legacy_pipeline():
+    pipeline = MagicMock()
+    pipeline.run = AsyncMock()
+    with (
+        patch("contribai.web.server.load_config", return_value=MagicMock()),
+        patch("contribai.web.server.ContribPipeline", return_value=pipeline),
+        patch(
+            "contribai.web.server._submit_control_command",
+            AsyncMock(return_value=MagicMock(id="work-live")),
+        ),
+    ):
+        from contribai.web.server import _background_run
+
+        await _background_run(None, "live")
+    pipeline.run.assert_not_awaited()

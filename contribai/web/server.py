@@ -215,6 +215,11 @@ async def trigger_run(
     """Trigger a pipeline run with an explicit execution mode."""
     if request.mode is ExecutionMode.LIVE:
         require_configured_api_key(presented_key)
+        config = _config or load_config()
+        item = await _submit_control_command(config, None, request.mode, source="web.run")
+        if item is None:
+            raise HTTPException(status_code=503, detail="control plane is not initialized")
+        return {"status": "queued", "mode": request.mode, "work_id": item.id}
     background_tasks.add_task(_background_run, None, request.mode)
     return {"status": "started", "mode": request.mode}
 
@@ -233,6 +238,18 @@ async def trigger_target(
         )
     if request.mode is ExecutionMode.LIVE:
         require_configured_api_key(presented_key)
+        config = _config or load_config()
+        item = await _submit_control_command(
+            config, request.repo_url, request.mode, source="web.run"
+        )
+        if item is None:
+            raise HTTPException(status_code=503, detail="control plane is not initialized")
+        return {
+            "status": "queued",
+            "repo_url": request.repo_url,
+            "mode": request.mode,
+            "work_id": item.id,
+        }
     background_tasks.add_task(_background_run, request.repo_url, request.mode)
     return {
         "status": "started",
