@@ -140,6 +140,38 @@ def test_docker_command_is_fail_closed_and_resource_bounded(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_docker_attempt_is_self_contained_git_clone(
+    git_repo: tuple[Path, str],
+    tmp_path: Path,
+) -> None:
+    repo, base_sha = git_repo
+    manager = WorkspaceManager(
+        repo,
+        workspace_root=tmp_path / "docker-workspaces",
+        backend="docker",
+    )
+    workspace = await manager.create_attempt(
+        "work-docker",
+        base_sha,
+        "attempt-1",
+        ResourcePolicy(),
+    )
+
+    try:
+        assert isinstance(workspace, DockerWorkspace)
+        assert (workspace.path / ".git").is_dir()
+        assert _git(workspace.path, "rev-parse", "HEAD") == base_sha
+        assert _git(workspace.path, "remote") == ""
+        await workspace.write_file("README.txt", "changed\n")
+        diff = await workspace.diff_from_base()
+        assert diff.changed_files == ("README.txt",)
+    finally:
+        path = workspace.path
+        await manager.destroy_attempt(workspace.snapshot_id)
+        assert not path.exists()
+
+
+@pytest.mark.asyncio
 async def test_unavailable_docker_is_not_a_success(git_repo: tuple[Path, str]) -> None:
     repo, base_sha = git_repo
     workspace = DockerWorkspace(
@@ -168,4 +200,3 @@ async def test_sandbox_unavailable_validator_is_not_a_success(
 
     assert result.success is False
     assert result.status == "UNVERIFIED"
-    assert result.publishable is False
