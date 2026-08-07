@@ -13,7 +13,11 @@ from pathlib import Path
 
 import aiosqlite
 
-from contribai.storage.work_items import WorkItemRepository, migrate_work_item_schema
+from contribai.storage.work_items import (
+    WorkItemRepository,
+    connection_transaction_lock,
+    migrate_work_item_schema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +117,11 @@ class Memory:
         """Initialize database connection and schema."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._db_path))
-        await self._db.execute("PRAGMA foreign_keys = ON")
-        await self._db.executescript(SCHEMA)
-        await self._db.commit()
+        self._transaction_lock = connection_transaction_lock(self._db)
+        async with self._transaction_lock:
+            await self._db.execute("PRAGMA foreign_keys = ON")
+            await self._db.executescript(SCHEMA)
+            await self._db.commit()
         await migrate_work_item_schema(self._db)
         self._work_items = WorkItemRepository(self._db, self._transaction_lock)
         logger.info("Memory initialized at %s", self._db_path)

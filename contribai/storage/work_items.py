@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final, cast
+from weakref import WeakKeyDictionary
 
 import aiosqlite
 
@@ -28,6 +29,10 @@ class StaleWorkItemError(RuntimeError):
 
 class IllegalSideEffectStateError(RuntimeError):
     """Raised when a side effect is recorded outside the publish lifecycle."""
+
+
+class SideEffectConflictError(RuntimeError):
+    """Raised when an idempotency key is reused with a different persisted result."""
 
 
 class DuplicateWorkItemError(RuntimeError):
@@ -181,6 +186,8 @@ MIGRATIONS: Final[tuple[tuple[int, str, tuple[str, ...]], ...]] = (
     (1, "contribution_control_plane", _CONTROL_PLANE_V1),
 )
 
+_CONNECTION_LOCKS: WeakKeyDictionary[aiosqlite.Connection, asyncio.Lock] = WeakKeyDictionary()
+
 _SIDE_EFFECT_STATES: Final[frozenset[WorkState]] = frozenset(
     {
         WorkState.PUBLISH_RESERVED,
@@ -196,13 +203,35 @@ _INTERRUPTED_ACTIVE_STATES: Final[frozenset[WorkState]] = frozenset(
         WorkState.SOLVING,
         WorkState.PATCH_COLLECTING,
         WorkState.VERIFYING,
+    }
+)
+
+_PUBLISH_BOUNDARY_STATES: Final[frozenset[WorkState]] = frozenset(
+    {
         WorkState.PUBLISH_RESERVED,
+        WorkState.PUBLISHED,
+        WorkState.CI_RUNNING,
+        WorkState.MERGED,
     }
 )
 
 
+def connection_transaction_lock(connection: aiosqlite.Connection) -> asyncio.Lock:
+    """Return the process-local transaction lock owned by one SQLite connection."""
+    lock = _CONNECTION_LOCKS.get(connection)
+    if lock is None:
+        lock = asyncio.Lock()
+        _CONNECTION_LOCKS[connection] = lock
+    return lock
+
+
 async def migrate_work_item_schema(connection: aiosqlite.Connection) -> None:
-    """Apply control-plane migrations exactly once without replacing legacy tables."""
+    """Apply migrations once, serialized with all work on the same connection."""
+    async with connection_transaction_lock(connection):
+        await _migrate_work_item_schema_unlocked(connection)
+
+
+async def _migrate_work_item_schema_unlocked(connection: aiosqlite.Connection) -> None:
     await connection.execute(SCHEMA_MIGRATIONS_TABLE)
     await connection.commit()
 
@@ -355,6 +384,11 @@ class WorkItemRepository:
                 raise InvalidWorkTransitionError(
                     f"Retry requires needs_fix, found {current.state.value}"
                 )
+            if await self._has_reached_publish_boundary(current.id):
+                raise InvalidWorkTransitionError(
+                    "Retry is forbidden after the WorkItem reached the published boundary; "
+                    "create a new WorkItem instead"
+                )
             updated = replace(
                 current,
                 state=WorkState.PREPARING,
@@ -414,6 +448,7 @@ class WorkItemRepository:
         self,
         work_item_id: str,
         *,
+        expected_version: int,
         effect_type: str,
         target: str,
         external_id: str | None,
@@ -426,14 +461,28 @@ class WorkItemRepository:
             raise ValueError("effect_type and target must not be empty")
         idempotency_key = _side_effect_key(work_item_id, effect_type, target)
         async with self._transaction():
+            existing = await self._get_side_effect(idempotency_key)
+            if existing is not None:
+                if not _same_side_effect_binding(
+                    existing,
+                    expected_version=expected_version,
+                    external_id=external_id,
+                    external_url=external_url,
+                    created_by_contribai=created_by_contribai,
+                    auto_close=auto_close,
+                ):
+                    raise SideEffectConflictError(
+                        f"Side-effect idempotency key conflicts with persisted result: "
+                        f"{idempotency_key}"
+                    )
+                return existing
+
             item = await self._require(work_item_id)
+            _require_version(item, expected_version)
             if item.state not in _SIDE_EFFECT_STATES:
                 raise IllegalSideEffectStateError(
                     f"Cannot record {effect_type} while WorkItem is {item.state.value}"
                 )
-            existing = await self._get_side_effect(idempotency_key)
-            if existing is not None:
-                return existing
 
             created_at = _utc_now()
             await self._connection.execute(
@@ -453,7 +502,7 @@ class WorkItemRepository:
                     external_url,
                     int(created_by_contribai),
                     int(auto_close),
-                    item.version,
+                    expected_version,
                     created_at,
                 ),
             )
@@ -466,7 +515,7 @@ class WorkItemRepository:
                 external_url=external_url,
                 created_by_contribai=created_by_contribai,
                 auto_close=auto_close,
-                work_item_version=item.version,
+                work_item_version=expected_version,
                 created_at=created_at,
             )
         return record
@@ -481,7 +530,7 @@ class WorkItemRepository:
             return int(row[0]) if row else 0
 
     async def recover_interrupted(self, *, reason: str) -> list[WorkItem]:
-        """Explicitly fail interrupted active work while preserving durable wait states."""
+        """Fail active work and flag uncertain publication for explicit reconciliation."""
         placeholders = ",".join("?" for _ in _INTERRUPTED_ACTIVE_STATES)
         state_values = tuple(sorted(state.value for state in _INTERRUPTED_ACTIVE_STATES))
         recovered: list[WorkItem] = []
@@ -514,6 +563,35 @@ class WorkItemRepository:
                     payload={"reason": reason},
                 )
                 recovered.append(updated)
+
+            cursor = await self._connection.execute(
+                """
+                SELECT id, repo, issue_number, mode, state, attempt, budget_json,
+                       version, created_at, updated_at
+                FROM work_items
+                WHERE state = ?
+                ORDER BY id
+                """,
+                (WorkState.PUBLISH_RESERVED.value,),
+            )
+            for row in await cursor.fetchall():
+                uncertain = _work_item_from_row(row)
+                if await self._has_event(
+                    uncertain.id,
+                    event_type="reconciliation_required",
+                    work_item_version=uncertain.version,
+                ):
+                    continue
+                await self._insert_event(
+                    uncertain,
+                    event_type="reconciliation_required",
+                    from_state=None,
+                    to_state=None,
+                    payload={
+                        "reason": reason[:500],
+                        "state": WorkState.PUBLISH_RESERVED.value,
+                    },
+                )
         return recovered
 
     async def _require(self, work_item_id: str) -> WorkItem:
@@ -600,6 +678,36 @@ class WorkItemRepository:
         row = await cursor.fetchone()
         return _side_effect_from_row(row) if row is not None else None
 
+    async def _has_event(
+        self,
+        work_item_id: str,
+        *,
+        event_type: str,
+        work_item_version: int,
+    ) -> bool:
+        cursor = await self._connection.execute(
+            """
+            SELECT 1 FROM work_events
+            WHERE work_item_id = ? AND event_type = ? AND work_item_version = ?
+            LIMIT 1
+            """,
+            (work_item_id, event_type, work_item_version),
+        )
+        return await cursor.fetchone() is not None
+
+    async def _has_reached_publish_boundary(self, work_item_id: str) -> bool:
+        placeholders = ",".join("?" for _ in _PUBLISH_BOUNDARY_STATES)
+        states = tuple(sorted(state.value for state in _PUBLISH_BOUNDARY_STATES))
+        cursor = await self._connection.execute(
+            f"""
+            SELECT 1 FROM work_events
+            WHERE work_item_id = ? AND to_state IN ({placeholders})
+            LIMIT 1
+            """,
+            (work_item_id, *states),
+        )
+        return await cursor.fetchone() is not None
+
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
@@ -625,6 +733,24 @@ def _side_effect_key(work_item_id: str, effect_type: str, target: str) -> str:
     )
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return f"side-effect:v1:{digest}"
+
+
+def _same_side_effect_binding(
+    persisted: SideEffectRecord,
+    *,
+    expected_version: int,
+    external_id: str | None,
+    external_url: str | None,
+    created_by_contribai: bool,
+    auto_close: bool,
+) -> bool:
+    return (
+        persisted.work_item_version == expected_version
+        and persisted.external_id == external_id
+        and persisted.external_url == external_url
+        and persisted.created_by_contribai is created_by_contribai
+        and persisted.auto_close is auto_close
+    )
 
 
 def _work_item_values(item: WorkItem) -> tuple[object, ...]:

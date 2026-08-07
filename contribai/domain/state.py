@@ -66,13 +66,9 @@ _ALLOWED_TRANSITIONS: Final[Mapping[WorkState, frozenset[WorkState]]] = MappingP
         WorkState.APPROVED: frozenset(
             {WorkState.PUBLISH_RESERVED, WorkState.NEEDS_FIX, WorkState.CLOSED}
         ),
-        WorkState.PUBLISH_RESERVED: frozenset(
-            {WorkState.PUBLISHED, WorkState.NEEDS_FIX, WorkState.CLOSED}
-        ),
-        WorkState.PUBLISHED: frozenset(
-            {WorkState.CI_RUNNING, WorkState.NEEDS_FIX, WorkState.CLOSED}
-        ),
-        WorkState.CI_RUNNING: frozenset({WorkState.MERGED, WorkState.NEEDS_FIX, WorkState.CLOSED}),
+        WorkState.PUBLISH_RESERVED: frozenset({WorkState.PUBLISHED, WorkState.CLOSED}),
+        WorkState.PUBLISHED: frozenset({WorkState.CI_RUNNING, WorkState.CLOSED}),
+        WorkState.CI_RUNNING: frozenset({WorkState.MERGED, WorkState.CLOSED}),
         WorkState.MERGED: frozenset(),
         WorkState.CLOSED: frozenset(),
         # Retrying is deliberately available only through WorkItemRepository.retry().

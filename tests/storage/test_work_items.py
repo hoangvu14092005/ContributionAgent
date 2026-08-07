@@ -15,8 +15,11 @@ from contribai.domain.work_item import BudgetSnapshot, WorkItem
 from contribai.orchestrator.memory import Memory
 from contribai.storage.work_items import (
     IllegalSideEffectStateError,
+    SideEffectConflictError,
     StaleWorkItemError,
     WorkItemRepository,
+    connection_transaction_lock,
+    migrate_work_item_schema,
 )
 
 
@@ -179,6 +182,96 @@ async def test_retry_is_explicit_and_increments_attempt(memory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_legacy_post_publish_needs_fix_record_cannot_be_retried(memory) -> None:
+    repository = memory.work_items
+    item = await repository.create(_new_item())
+    item = await _advance(
+        repository,
+        item,
+        WorkState.QUALIFIED,
+        WorkState.RESERVED,
+        WorkState.PREPARING,
+        WorkState.SOLVING,
+        WorkState.PATCH_COLLECTING,
+        WorkState.PATCHED,
+        WorkState.VERIFYING,
+        WorkState.VERIFIED,
+        WorkState.REVIEW_PENDING,
+        WorkState.APPROVED,
+        WorkState.PUBLISH_RESERVED,
+        WorkState.PUBLISHED,
+    )
+    legacy_version = item.version + 1
+    await memory.connection.execute(
+        "UPDATE work_items SET state = ?, version = ? WHERE id = ?",
+        (WorkState.NEEDS_FIX.value, legacy_version, item.id),
+    )
+    await memory.connection.execute(
+        """
+        INSERT INTO work_events
+            (work_item_id, event_type, from_state, to_state, attempt,
+             work_item_version, payload_json, created_at)
+        VALUES (?, 'legacy_transition', ?, ?, ?, ?, '{}', ?)
+        """,
+        (
+            item.id,
+            WorkState.PUBLISHED.value,
+            WorkState.NEEDS_FIX.value,
+            item.attempt,
+            legacy_version,
+            item.updated_at,
+        ),
+    )
+    await memory.connection.commit()
+
+    with pytest.raises(InvalidWorkTransitionError, match="published"):
+        await repository.retry(item.id, expected_version=legacy_version, reason="must be new work")
+
+
+@pytest.mark.asyncio
+async def test_repository_rejects_needs_fix_after_publication(memory) -> None:
+    repository = memory.work_items
+    item = await repository.create(_new_item())
+    item = await _advance(
+        repository,
+        item,
+        WorkState.QUALIFIED,
+        WorkState.RESERVED,
+        WorkState.PREPARING,
+        WorkState.SOLVING,
+        WorkState.PATCH_COLLECTING,
+        WorkState.PATCHED,
+        WorkState.VERIFYING,
+        WorkState.VERIFIED,
+        WorkState.REVIEW_PENDING,
+        WorkState.APPROVED,
+        WorkState.PUBLISH_RESERVED,
+        WorkState.PUBLISHED,
+    )
+
+    with pytest.raises(InvalidWorkTransitionError):
+        await repository.transition(
+            item.id,
+            WorkState.NEEDS_FIX,
+            expected_version=item.version,
+        )
+    assert await repository.get(item.id) == item
+
+    item = await repository.transition(
+        item.id,
+        WorkState.CI_RUNNING,
+        expected_version=item.version,
+    )
+    with pytest.raises(InvalidWorkTransitionError):
+        await repository.transition(
+            item.id,
+            WorkState.NEEDS_FIX,
+            expected_version=item.version,
+        )
+    assert await repository.get(item.id) == item
+
+
+@pytest.mark.asyncio
 async def test_concurrent_transitions_reject_the_stale_snapshot(memory) -> None:
     repository = memory.work_items
     item = await repository.create(_new_item())
@@ -306,6 +399,7 @@ async def test_side_effect_is_state_gated_and_idempotent(memory) -> None:
     with pytest.raises(IllegalSideEffectStateError):
         await repository.record_side_effect(
             item.id,
+            expected_version=item.version,
             effect_type="create_pr",
             target="owner/repo:patch-sha",
             external_id="123",
@@ -331,6 +425,7 @@ async def test_side_effect_is_state_gated_and_idempotent(memory) -> None:
     )
     first = await repository.record_side_effect(
         item.id,
+        expected_version=item.version,
         effect_type="create_pr",
         target="owner/repo:patch-sha",
         external_id="123",
@@ -338,19 +433,111 @@ async def test_side_effect_is_state_gated_and_idempotent(memory) -> None:
         created_by_contribai=True,
         auto_close=False,
     )
+    assert first.work_item_version == item.version
+
+    published = await repository.transition(
+        item.id,
+        WorkState.PUBLISHED,
+        expected_version=item.version,
+    )
     duplicate = await repository.record_side_effect(
         item.id,
+        expected_version=item.version,
         effect_type="create_pr",
         target="owner/repo:patch-sha",
-        external_id="different-result-is-ignored",
-        external_url="https://example.invalid/duplicate",
-        created_by_contribai=False,
-        auto_close=True,
+        external_id="123",
+        external_url="https://github.com/owner/repo/pull/123",
+        created_by_contribai=True,
+        auto_close=False,
     )
 
     assert duplicate == first
+    assert published.version == item.version + 1
     assert first.created_by_contribai is True
     assert first.auto_close is False
+    assert await repository.count_side_effects(item.id) == 1
+
+
+@pytest.mark.asyncio
+async def test_side_effect_rejects_stale_writer_before_insert(memory) -> None:
+    repository = memory.work_items
+    item = await repository.create(_new_item())
+    item = await _advance(
+        repository,
+        item,
+        WorkState.QUALIFIED,
+        WorkState.RESERVED,
+        WorkState.PREPARING,
+        WorkState.SOLVING,
+        WorkState.PATCH_COLLECTING,
+        WorkState.PATCHED,
+        WorkState.VERIFYING,
+        WorkState.VERIFIED,
+        WorkState.REVIEW_PENDING,
+        WorkState.APPROVED,
+        WorkState.PUBLISH_RESERVED,
+    )
+    await repository.transition(
+        item.id,
+        WorkState.PUBLISHED,
+        expected_version=item.version,
+    )
+
+    with pytest.raises(StaleWorkItemError):
+        await repository.record_side_effect(
+            item.id,
+            expected_version=item.version,
+            effect_type="create_issue",
+            target="owner/repo:issue-for-patch",
+            external_id="44",
+            external_url="https://github.com/owner/repo/issues/44",
+            created_by_contribai=True,
+            auto_close=True,
+        )
+    assert await repository.count_side_effects(item.id) == 0
+
+
+@pytest.mark.asyncio
+async def test_side_effect_same_key_with_different_result_raises_typed_conflict(memory) -> None:
+    repository = memory.work_items
+    item = await repository.create(_new_item())
+    item = await _advance(
+        repository,
+        item,
+        WorkState.QUALIFIED,
+        WorkState.RESERVED,
+        WorkState.PREPARING,
+        WorkState.SOLVING,
+        WorkState.PATCH_COLLECTING,
+        WorkState.PATCHED,
+        WorkState.VERIFYING,
+        WorkState.VERIFIED,
+        WorkState.REVIEW_PENDING,
+        WorkState.APPROVED,
+        WorkState.PUBLISH_RESERVED,
+    )
+    await repository.record_side_effect(
+        item.id,
+        expected_version=item.version,
+        effect_type="create_pr",
+        target="owner/repo:patch-sha",
+        external_id="123",
+        external_url="https://github.com/owner/repo/pull/123",
+        created_by_contribai=True,
+        auto_close=False,
+    )
+
+    with pytest.raises(SideEffectConflictError):
+        await repository.record_side_effect(
+            item.id,
+            expected_version=item.version,
+            effect_type="create_pr",
+            target="owner/repo:patch-sha",
+            external_id="999",
+            external_url="https://github.com/owner/repo/pull/999",
+            created_by_contribai=False,
+            auto_close=True,
+        )
     assert await repository.count_side_effects(item.id) == 1
 
 
@@ -436,6 +623,29 @@ async def test_migration_is_versioned_idempotent_and_preserves_existing_memory_d
 
 
 @pytest.mark.asyncio
+async def test_concurrent_migrations_on_same_connection_are_serialized(tmp_path: Path) -> None:
+    async with aiosqlite.connect(tmp_path / "concurrent-migration.db") as connection:
+        await asyncio.gather(*(migrate_work_item_schema(connection) for _ in range(5)))
+
+        cursor = await connection.execute(
+            "SELECT version, COUNT(*) FROM schema_migrations GROUP BY version"
+        )
+        assert await cursor.fetchall() == [(1, 1)]
+
+
+@pytest.mark.asyncio
+async def test_memory_reuses_connection_migration_lock_without_deadlock(tmp_path: Path) -> None:
+    memory = Memory(tmp_path / "shared-lock.db")
+    await asyncio.wait_for(memory.init(), timeout=1)
+    try:
+        assert memory._transaction_lock is connection_transaction_lock(memory.connection)
+        item = await asyncio.wait_for(memory.work_items.create(_new_item()), timeout=1)
+        assert item.state is WorkState.DISCOVERED
+    finally:
+        await memory.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_recovery_marks_active_work_needs_fix_but_preserves_waiting(memory) -> None:
     repository = memory.work_items
     active = await repository.create(_new_item("active"))
@@ -467,3 +677,52 @@ async def test_explicit_recovery_marks_active_work_needs_fix_but_preserves_waiti
     assert loaded_active.version == active.version + 1
     assert loaded_waiting == waiting
     assert (await repository.list_events(active.id))[-1].event_type == "recovery"
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_preserves_publish_reserved_for_reconciliation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "publish-reconciliation.db"
+    first_memory = Memory(path)
+    await first_memory.init()
+    item = await first_memory.work_items.create(_new_item("publish-uncertain"))
+    item = await _advance(
+        first_memory.work_items,
+        item,
+        WorkState.QUALIFIED,
+        WorkState.RESERVED,
+        WorkState.PREPARING,
+        WorkState.SOLVING,
+        WorkState.PATCH_COLLECTING,
+        WorkState.PATCHED,
+        WorkState.VERIFYING,
+        WorkState.VERIFIED,
+        WorkState.REVIEW_PENDING,
+        WorkState.APPROVED,
+        WorkState.PUBLISH_RESERVED,
+    )
+    await first_memory.close()
+
+    second_memory = Memory(path)
+    await second_memory.init()
+    try:
+        assert await second_memory.work_items.recover_interrupted(reason="restart") == []
+        assert await second_memory.work_items.recover_interrupted(reason="restart again") == []
+        loaded = await second_memory.work_items.get(item.id)
+        assert loaded == item
+        events = await second_memory.work_items.list_events(item.id)
+        reconciliation_events = [
+            event for event in events if event.event_type == "reconciliation_required"
+        ]
+        assert len(reconciliation_events) == 1
+        assert reconciliation_events[0].work_item_version == item.version
+
+        with pytest.raises(InvalidWorkTransitionError):
+            await second_memory.work_items.retry(
+                item.id,
+                expected_version=item.version,
+                reason="unsafe retry",
+            )
+    finally:
+        await second_memory.close()

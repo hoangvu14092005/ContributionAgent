@@ -40,6 +40,17 @@ def test_retry_cannot_be_expressed_as_an_ordinary_transition() -> None:
         validate_transition(WorkState.NEEDS_FIX, WorkState.PREPARING)
 
 
+@pytest.mark.parametrize(
+    "published_state",
+    [WorkState.PUBLISH_RESERVED, WorkState.PUBLISHED, WorkState.CI_RUNNING],
+)
+def test_publish_boundary_cannot_transition_to_retryable_state(
+    published_state: WorkState,
+) -> None:
+    with pytest.raises(InvalidWorkTransitionError):
+        validate_transition(published_state, WorkState.NEEDS_FIX)
+
+
 def test_budget_snapshot_is_canonical_serializable_and_immutable() -> None:
     budget = BudgetSnapshot.from_mapping(
         {
