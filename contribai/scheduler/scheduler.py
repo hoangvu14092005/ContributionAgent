@@ -63,6 +63,12 @@ class ContribScheduler:
             logger.info("Scheduled command queued as %s (%s)", work_item.id, mode.value)
         finally:
             await memory.close()
+        if mode is ExecutionMode.LIVE:
+            logger.info(
+                "Scheduled LIVE WorkItem %s queued; legacy direct publishing is disabled",
+                work_item.id,
+            )
+            return
         pipeline = ContribPipeline(self.config)
         try:
             result = await pipeline.run(dry_run=mode.dry_run)

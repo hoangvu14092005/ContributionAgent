@@ -315,3 +315,21 @@ async def test_webhook_scheduler_and_web_helpers_use_explicit_mode(tmp_path) -> 
     )
     assert item is not None
     assert item.mode is ExecutionMode.REVIEW_ONLY
+
+
+@pytest.mark.asyncio
+async def test_scheduler_live_queues_without_legacy_publish(tmp_path) -> None:
+    config = ContribAIConfig(
+        github=GitHubConfig(token="test"),
+        llm=LLMConfig(provider="gemini", api_key="test"),
+        storage=StorageConfig(db_path=str(tmp_path / "scheduler-live.db")),
+    )
+    config.scheduler.mode = ExecutionMode.LIVE
+    pipeline = MagicMock()
+    pipeline.run = AsyncMock()
+
+    with patch("contribai.scheduler.scheduler.ContribPipeline", return_value=pipeline):
+        scheduler = ContribScheduler(config)
+        await scheduler._run_pipeline()
+
+    pipeline.run.assert_not_awaited()

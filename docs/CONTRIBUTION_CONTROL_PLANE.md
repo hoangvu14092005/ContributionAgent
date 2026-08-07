@@ -1,8 +1,10 @@
 # Contribution Control Plane
 
-Status: active architecture for the current `4.1.0` codebase. The legacy
-pipeline remains available as a transitional implementation behind the new
-entry-point command path; it is not the security authority for publishing.
+Status: active safety/control-plane architecture for the current `4.1.0`
+codebase. The durable queue, workspace/engine contracts, verification/review
+proofs, and publish gate are implemented. A proof-complete execution worker is
+not yet wired into the legacy discovery pipeline, so LIVE entry points queue a
+WorkItem and do not fall back to legacy direct publishing.
 
 ## Boundary
 
@@ -94,8 +96,10 @@ rates, cost, wall time, acceptance, merge, review latency, and policy metrics.
 The control-plane queueing and publish gate are active. Existing generator,
 issue-solver, and patrol implementations still contain legacy logic while
 their execution is migrated behind `EngineDriver`, `PatchCollector`, and
-`VerificationEngine`. Direct GitHub writes outside `GitHubPublisher` are
-blocked or delegated by the current architecture tests. Do not add a new
+`VerificationEngine`. LIVE CLI/Web/Scheduler commands stop after durable queue
+submission until that worker is wired; SHADOW and REVIEW_ONLY may execute the
+legacy pipeline only with `dry_run=True`. Direct GitHub writes outside
+`GitHubPublisher` are blocked by architecture tests. Do not add an
 engine-specific publisher or bypass `CommandService` from an entry point.
 
 ## Verification commands

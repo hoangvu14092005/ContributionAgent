@@ -184,7 +184,13 @@ async def _background_run(repo_url: str | None, mode: ExecutionMode):
     """Execute pipeline in background."""
     mode = ExecutionMode(mode)
     config = load_config()
-    await _submit_control_command(config, repo_url, mode, source="web.run")
+    work_item = await _submit_control_command(config, repo_url, mode, source="web.run")
+    if mode is ExecutionMode.LIVE:
+        logger.info(
+            "Queued LIVE web WorkItem %s; legacy direct publishing is disabled",
+            work_item.id if work_item else "<unavailable>",
+        )
+        return
     pipeline = ContribPipeline(config)
     try:
         if repo_url:

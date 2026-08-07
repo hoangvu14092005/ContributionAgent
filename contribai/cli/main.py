@@ -194,13 +194,20 @@ def run(ctx, language, stars, max_prs, dry_run, human_review, events_log):
     )
     console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")
 
+    if execution_mode is ExecutionMode.LIVE:
+        console.print(
+            "   [yellow]LIVE request queued. Legacy direct publishing is disabled; "
+            "a control-plane worker must process this WorkItem.[/yellow]"
+        )
+        return
+
     from contribai.orchestrator.pipeline import ContribPipeline
 
     pipeline = ContribPipeline(config)
-    result = asyncio.run(pipeline.run(dry_run=dry_run))
+    result = asyncio.run(pipeline.run(dry_run=execution_mode.dry_run))
 
     # Print results
-    _print_result(result, dry_run)
+    _print_result(result, execution_mode.dry_run)
 
 
 @cli.command()
@@ -249,11 +256,18 @@ def target(ctx, url, types, dry_run, human_review):
     )
     console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")
 
+    if execution_mode is ExecutionMode.LIVE:
+        console.print(
+            "   [yellow]LIVE request queued. Legacy direct publishing is disabled; "
+            "a control-plane worker must process this WorkItem.[/yellow]"
+        )
+        return
+
     from contribai.orchestrator.pipeline import ContribPipeline
 
     pipeline = ContribPipeline(config)
-    result = asyncio.run(pipeline.run_single(url, dry_run=dry_run))
-    _print_result(result, dry_run)
+    result = asyncio.run(pipeline.run_single(url, dry_run=execution_mode.dry_run))
+    _print_result(result, execution_mode.dry_run)
 
 
 @cli.command()
@@ -327,11 +341,25 @@ def hunt(ctx, rounds, delay, language, mode, dry_run, human_review, events_log):
     )
     console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")
 
+    if execution_mode is ExecutionMode.LIVE:
+        console.print(
+            "   [yellow]LIVE request queued. Legacy direct publishing is disabled; "
+            "a control-plane worker must process this WorkItem.[/yellow]"
+        )
+        return
+
     from contribai.orchestrator.pipeline import ContribPipeline
 
     pipeline = ContribPipeline(config)
-    result = asyncio.run(pipeline.hunt(rounds=rounds, delay_sec=delay, dry_run=dry_run, mode=mode))
-    _print_result(result, dry_run)
+    result = asyncio.run(
+        pipeline.hunt(
+            rounds=rounds,
+            delay_sec=delay,
+            dry_run=execution_mode.dry_run,
+            mode=mode,
+        )
+    )
+    _print_result(result, execution_mode.dry_run)
 
 
 @cli.group()
