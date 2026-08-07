@@ -68,24 +68,25 @@ class WorkspaceManager:
         workspace_path = self.workspace_root / (
             f"{work_component}-{attempt_component}-{uuid.uuid4().hex[:12]}"
         )
-        local = await LocalWorkspace.create(
-            self.repository,
-            base_sha=base_sha,
-            snapshot_id=snapshot_id,
-            attempt_id=attempt_id,
-            workspace_path=workspace_path,
-            policy=policy,
-        )
-        workspace: Workspace = local
+
         if self.backend == "docker":
-            workspace = DockerWorkspace(
+            workspace: Workspace = await DockerWorkspace.create(
                 self.repository,
-                base_sha=local.base_sha,
-                snapshot_id=local.snapshot_id,
-                attempt_id=local.attempt_id,
-                workspace_path=local.path,
+                base_sha=base_sha,
+                snapshot_id=snapshot_id,
+                attempt_id=attempt_id,
+                workspace_path=workspace_path,
                 policy=policy,
                 image=self.docker_image,
+            )
+        else:
+            workspace = await LocalWorkspace.create(
+                self.repository,
+                base_sha=base_sha,
+                snapshot_id=snapshot_id,
+                attempt_id=attempt_id,
+                workspace_path=workspace_path,
+                policy=policy,
             )
         self._attempts[snapshot_id] = workspace
         return workspace
