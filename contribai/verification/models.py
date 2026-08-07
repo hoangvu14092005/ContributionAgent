@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -102,15 +103,34 @@ class VerificationReport:
 
     @property
     def verification_id(self) -> str:
-        """Stable evidence identifier for PublishPermit binding."""
-        payload = "\x00".join(
-            (
-                self.candidate_hash,
-                self.status.value,
-                *(f"{item.check}:{item.passed}:{item.exit_code}" for item in self.evidence),
-            )
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()
+        """Stable identifier bound to the exact verification commands/evidence."""
+        evidence = [
+            {
+                "check": item.check,
+                "passed": item.passed,
+                "status": item.status,
+                "command": item.command,
+                "exit_code": item.exit_code,
+                "output_sha256": hashlib.sha256(item.output.encode("utf-8")).hexdigest(),
+                "recoverable": item.recoverable,
+            }
+            for item in self.evidence
+        ]
+        payload = {
+            "candidate_hash": self.candidate_hash,
+            "status": self.status.value,
+            "baseline_passed": self.baseline_passed,
+            "syntax_passed": self.syntax_passed,
+            "tests_passed": self.tests_passed,
+            "lint_passed": self.lint_passed,
+            "typecheck_passed": self.typecheck_passed,
+            "security_passed": self.security_passed,
+            "tests_run": self.tests_run,
+            "tests_failed": self.tests_failed,
+            "evidence": evidence,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
 
 def _redact(value: str) -> str:
