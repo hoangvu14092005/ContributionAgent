@@ -79,12 +79,23 @@ jobs:
               storage_test.write_text(tests + extra, encoding="utf-8")
           PY
       - name: Validate permit migration
+        shell: bash
         run: |
-          pip install -e ".[dev,mcp]"
-          ruff format contribai/storage/work_items.py contribai/control/command_service.py tests/storage/test_work_items.py tests/integration/test_entrypoints_control_plane.py
-          ruff check contribai/storage/work_items.py contribai/control/command_service.py
-          pytest -q tests/storage/test_work_items.py tests/integration/test_entrypoints_control_plane.py tests/unit/test_publishing_idempotency.py
-          python -m compileall -q contribai/storage contribai/control
+          set -o pipefail
+          {
+            pip install -e ".[dev,mcp]"
+            ruff format contribai/storage/work_items.py contribai/control/command_service.py tests/storage/test_work_items.py tests/integration/test_entrypoints_control_plane.py
+            ruff check contribai/storage/work_items.py contribai/control/command_service.py
+            pytest -q tests/storage/test_work_items.py tests/integration/test_entrypoints_control_plane.py tests/unit/test_publishing_idempotency.py
+            python -m compileall -q contribai/storage contribai/control
+          } 2>&1 | tee permit-validation.log
+      - name: Upload permit diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: permit-migration-diagnostics
+          path: permit-validation.log
+          if-no-files-found: ignore
       - name: Commit permit migration
         shell: bash
         run: |
