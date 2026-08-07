@@ -46,7 +46,12 @@ def execution_lease(tmp_path: Path) -> ExecutionLease:
         attempt_id="attempt-1",
         workspace_ref="snapshot-1",
         budget=ExecutionBudget(20, 2.0, 30, 3),
-        workspace=SimpleNamespace(path=tmp_path, policy=ResourcePolicy()),
+        workspace=SimpleNamespace(
+            path=tmp_path,
+            policy=ResourcePolicy(),
+            snapshot_id="snapshot-1",
+            attempt_id="attempt-1",
+        ),
         credential_lease=CredentialLease(
             work_id="work-1",
             attempt_id="attempt-1",
