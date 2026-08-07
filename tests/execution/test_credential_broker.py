@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -152,3 +153,8 @@ async def test_model_gateway_is_the_only_boundary_that_receives_raw_key() -> Non
     assert await gateway.complete_request(request, lease) == "ok"
     assert captured == [("custom", lease.lease_id)]
     assert broker.redact(lease.token) == "[REDACTED]"
+
+    with pytest.raises(CredentialDeniedError, match="scope"):
+        await gateway.complete_request(replace(request, credential_scope=None), lease)
+    with pytest.raises(CredentialDeniedError, match="scope"):
+        await gateway.complete_request(replace(request, credential_scope="other-lease"), lease)
