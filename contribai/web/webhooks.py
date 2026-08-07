@@ -28,6 +28,15 @@ _on_event_callback = None
 MAX_PAYLOAD_SIZE = 10 * 1024 * 1024
 
 
+def reset_webhooks() -> None:
+    """Disable webhook dispatch and remove all process-global state."""
+    global _webhook_enabled, _webhook_secret, _webhook_mode, _on_event_callback
+    _webhook_enabled = False
+    _webhook_secret = ""
+    _webhook_mode = ExecutionMode.SHADOW
+    _on_event_callback = None
+
+
 def configure_webhooks(
     *,
     enabled: bool,
@@ -37,12 +46,15 @@ def configure_webhooks(
 ):
     """Configure webhook safety policy and event handler."""
     global _webhook_enabled, _webhook_secret, _webhook_mode, _on_event_callback
+    mode = ExecutionMode(mode)
+    if mode is ExecutionMode.LIVE:
+        raise ValueError("live webhook mode is forbidden")
     if enabled and not secret.strip():
         raise ValueError("webhook secret is required when webhooks are enabled")
 
     _webhook_enabled = enabled
     _webhook_secret = secret
-    _webhook_mode = ExecutionMode(mode)
+    _webhook_mode = mode
     _on_event_callback = on_event
 
 
@@ -64,8 +76,8 @@ async def github_webhook(request: Request):
     # Read body once — used for signature check and payload size fallback
     body = await request.body()
 
-    # Bug 4 fix: if content-length header is missing, check actual body size
-    if not content_length and len(body) > MAX_PAYLOAD_SIZE:
+    # Content-Length is untrusted and may underreport the payload.
+    if len(body) > MAX_PAYLOAD_SIZE:
         return JSONResponse({"error": "Payload too large"}, status_code=413)
 
     # Enabled receivers always have a configured secret and require a valid signature.
@@ -84,7 +96,43 @@ async def github_webhook(request: Request):
         return JSONResponse({"error": "JSON payload must be an object"}, status_code=400)
 
     action = payload.get("action", "")
-    repo_name = payload.get("repository", {}).get("full_name", "")
+    if not isinstance(action, str):
+        return JSONResponse({"error": "action must be a string"}, status_code=400)
+
+    repo_name = ""
+    repo_url = ""
+    issue_number = None
+    issue_title = ""
+    ref = ""
+    if event_type in {"issues", "push"}:
+        repository = payload.get("repository")
+        if not isinstance(repository, dict):
+            return JSONResponse({"error": "repository must be an object"}, status_code=400)
+
+        repo_name = repository.get("full_name", "")
+        repo_url = repository.get("html_url", "")
+        if not isinstance(repo_name, str):
+            return JSONResponse({"error": "repository.full_name must be a string"}, status_code=400)
+        if not isinstance(repo_url, str):
+            return JSONResponse({"error": "repository.html_url must be a string"}, status_code=400)
+
+    if event_type == "issues":
+        issue = payload.get("issue")
+        if not isinstance(issue, dict):
+            return JSONResponse({"error": "issue must be an object"}, status_code=400)
+        issue_number = issue.get("number")
+        issue_title = issue.get("title", "")
+        if issue_number is not None and (
+            not isinstance(issue_number, int) or isinstance(issue_number, bool)
+        ):
+            return JSONResponse({"error": "issue.number must be an integer"}, status_code=400)
+        if not isinstance(issue_title, str):
+            return JSONResponse({"error": "issue.title must be a string"}, status_code=400)
+
+    if event_type == "push":
+        ref = payload.get("ref", "")
+        if not isinstance(ref, str):
+            return JSONResponse({"error": "ref must be a string"}, status_code=400)
 
     logger.info(
         "Webhook: %s.%s from %s",
@@ -95,23 +143,19 @@ async def github_webhook(request: Request):
 
     # Handle events
     trigger = False
-    repo_url = ""
 
     if event_type == "issues" and action in (
         "opened",
         "labeled",
     ):
-        repo_url = payload.get("repository", {}).get("html_url", "")
         trigger = True
         logger.info(
             "Issue event: #%s %s",
-            payload.get("issue", {}).get("number"),
-            payload.get("issue", {}).get("title"),
+            issue_number,
+            issue_title,
         )
 
     elif event_type == "push":
-        repo_url = payload.get("repository", {}).get("html_url", "")
-        ref = payload.get("ref", "")
         if ref.endswith("/main") or ref.endswith("/master"):
             trigger = True
             logger.info("Push to default branch: %s", ref)

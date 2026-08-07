@@ -202,8 +202,10 @@ class WebConfig(BaseModel):
     webhook_mode: ExecutionMode = ExecutionMode.SHADOW
 
     @model_validator(mode="after")
-    def validate_webhook_secret(self):
-        """Reject enabled webhook receivers without an HMAC secret."""
+    def validate_webhook_configuration(self):
+        """Reject webhook configurations that could trigger unsafe writes."""
+        if self.webhook_mode is ExecutionMode.LIVE:
+            raise ValueError("webhook_mode must be shadow or review_only, never live")
         if self.webhook_enabled and not self.webhook_secret.strip():
             raise ValueError("webhook_secret is required when webhook_enabled is true")
         return self

@@ -17,10 +17,15 @@ from contribai.control.mode import ExecutionMode
 from contribai.core.config import ContribAIConfig, load_config
 from contribai.orchestrator.memory import Memory
 from contribai.orchestrator.pipeline import ContribPipeline
-from contribai.web.auth import configure_auth, get_presented_api_key, require_configured_api_key
+from contribai.web.auth import (
+    configure_auth,
+    get_presented_api_key,
+    require_configured_api_key,
+    reset_auth,
+)
 from contribai.web.dashboard import render_dashboard
 from contribai.web.schemas import RunRequest
-from contribai.web.webhooks import configure_webhooks
+from contribai.web.webhooks import configure_webhooks, reset_webhooks
 from contribai.web.webhooks import router as webhook_router
 
 logger = logging.getLogger(__name__)
@@ -37,6 +42,9 @@ async def _webhook_event_handler(
 ):
     """Handle webhook events by running pipeline."""
     mode = ExecutionMode(mode)
+    if mode is ExecutionMode.LIVE:
+        logger.error("Rejected forbidden live webhook run for %s", repo_url)
+        return
     config = load_config()
     pipeline = ContribPipeline(config)
     try:
@@ -57,25 +65,33 @@ async def _webhook_event_handler(
 async def lifespan(app: FastAPI):
     """Initialize and cleanup shared resources."""
     global _config, _memory
-    _config = load_config()
-    _memory = Memory(_config.storage.resolved_db_path)
-    await _memory.init()
+    reset_auth()
+    reset_webhooks()
+    _config = None
+    _memory = None
+    try:
+        _config = load_config()
+        _memory = Memory(_config.storage.resolved_db_path)
+        await _memory.init()
 
-    # Configure auth
-    configure_auth(_config.web.api_keys)
+        configure_auth(_config.web.api_keys)
+        configure_webhooks(
+            enabled=_config.web.webhook_enabled,
+            secret=_config.web.webhook_secret,
+            mode=_config.web.webhook_mode,
+            on_event=_webhook_event_handler,
+        )
 
-    # Configure webhooks
-    configure_webhooks(
-        enabled=_config.web.webhook_enabled,
-        secret=_config.web.webhook_secret,
-        mode=_config.web.webhook_mode,
-        on_event=_webhook_event_handler,
-    )
-
-    logger.info("Dashboard API started")
-    yield
-    if _memory:
-        await _memory.close()
+        logger.info("Dashboard API started")
+        yield
+    finally:
+        reset_auth()
+        reset_webhooks()
+        memory = _memory
+        _config = None
+        _memory = None
+        if memory is not None:
+            await memory.close()
 
 
 app = FastAPI(

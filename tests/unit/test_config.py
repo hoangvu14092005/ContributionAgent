@@ -39,6 +39,14 @@ class TestContribAIConfig:
             with pytest.raises(ValidationError, match="webhook_secret"):
                 WebConfig(webhook_enabled=True, webhook_secret=secret)
 
+    def test_webhook_mode_live_is_rejected(self):
+        with pytest.raises(ValidationError, match="webhook_mode"):
+            WebConfig(
+                webhook_enabled=True,
+                webhook_secret="configured-secret",
+                webhook_mode=ExecutionMode.LIVE,
+            )
+
 
 class TestLoadConfig:
     def test_load_from_yaml(self, tmp_path):

@@ -24,6 +24,13 @@ _valid_keys: list[str] = []
 _auth_enabled: bool = False
 
 
+def reset_auth() -> None:
+    """Remove all process-global API key state."""
+    global _valid_keys, _auth_enabled
+    _valid_keys = []
+    _auth_enabled = False
+
+
 def configure_auth(api_keys: list[str]):
     """Configure valid API keys at startup."""
     global _valid_keys, _auth_enabled
