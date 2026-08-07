@@ -467,6 +467,29 @@ class GitHubClient:
             json=payload,
         )
 
+    async def delete_file(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        message: str,
+        branch: str,
+        *,
+        authority: GitHubWriteAuthority,
+        sha: str,
+        signoff: str | None = None,
+    ) -> dict:
+        """Delete one file from a branch through the contents API."""
+        if not sha.strip():
+            raise ValueError("delete_file requires a blob SHA")
+        if signoff and "Signed-off-by:" not in message:
+            message = f"{message}\n\nSigned-off-by: {signoff}"
+        return await self._delete(
+            f"/repos/{owner}/{repo}/contents/{path}",
+            authority=authority,
+            json={"message": message, "sha": sha, "branch": branch},
+        )
+
     async def create_pull_request(
         self,
         owner: str,

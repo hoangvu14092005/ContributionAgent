@@ -67,7 +67,19 @@ def require_execution_scope(request: EngineRequest, execution: ExecutionLease) -
         raise EngineBoundaryError("engine request work scope does not match execution lease")
     if request.attempt_id != execution.attempt_id:
         raise EngineBoundaryError("engine request attempt scope does not match execution lease")
-    if request.budget.snapshot().to_json() != execution.budget.snapshot().to_json():
+    request_limits = (
+        request.budget.max_steps,
+        request.budget.max_cost_usd,
+        request.budget.max_wall_time_sec,
+        request.budget.max_tool_failures,
+    )
+    execution_limits = (
+        execution.budget.max_steps,
+        execution.budget.max_cost_usd,
+        execution.budget.max_wall_time_sec,
+        execution.budget.max_tool_failures,
+    )
+    if request_limits != execution_limits:
         raise EngineBoundaryError("engine request budget does not match execution lease")
 
 
@@ -157,7 +169,11 @@ def coerce_result(value: object) -> AdapterResult | EngineOutcome:
         raw_events = value.get("events", ())
         if isinstance(raw_events, (str, bytes)):
             raw_events = (
-                raw_events.decode(errors="replace") if isinstance(raw_events, bytes) else raw_events,
+                (
+                    raw_events.decode(errors="replace")
+                    if isinstance(raw_events, bytes)
+                    else raw_events
+                ),
             )
         metadata = value.get("metadata", {})
         if not isinstance(metadata, Mapping):
@@ -230,7 +246,12 @@ class ExternalEngineDriver:
     engine_name = "external"
     engine_version = "external@unknown"
 
-    def __init__(self, *, require_gateway: bool = True, max_events: int = MAX_ADAPTER_EVENTS) -> None:
+    def __init__(
+        self,
+        *,
+        require_gateway: bool = True,
+        max_events: int = MAX_ADAPTER_EVENTS,
+    ) -> None:
         self.require_gateway = require_gateway
         self.max_events = max(1, max_events)
 
@@ -376,7 +397,9 @@ async def wait_with_cancel(
     on_cancel: Callable[[], Awaitable[object] | object] | None = None,
 ) -> object:
     operation_task = asyncio.create_task(operation)
-    cancel_task = asyncio.create_task(execution.cancel_event.wait()) if execution.cancel_event else None
+    cancel_task = (
+        asyncio.create_task(execution.cancel_event.wait()) if execution.cancel_event else None
+    )
     try:
         tasks = {operation_task}
         if cancel_task:

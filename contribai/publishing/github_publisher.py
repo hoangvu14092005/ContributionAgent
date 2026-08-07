@@ -186,18 +186,21 @@ class GitHubPublisher:
                             f"Expected existing file is unavailable: {change.path}"
                         ) from exc
                     if not sha:
-                        raise PRCreationError(f"Existing file has no GitHub blob SHA: {change.path}")
+                        raise PRCreationError(
+                            f"Existing file has no GitHub blob SHA: {change.path}"
+                        )
 
                 self._validate_write(permit, candidate, Capability.GITHUB_PUSH)
                 if change.is_deleted:
                     if not sha:
                         raise PRCreationError(f"Cannot delete file without blob SHA: {change.path}")
-                    await self._delete_file(
+                    await self._github.delete_file(
                         fork.owner,
                         fork.name,
                         change.path,
                         contribution.commit_message,
                         branch,
+                        authority=self.__write_authority,
                         sha=sha,
                         signoff=signoff,
                     )
@@ -223,7 +226,9 @@ class GitHubPublisher:
                     target_repo,
                 )
                 if issue_number is None:
-                    raise PRCreationError("Repository requires an issue link but issue creation failed")
+                    raise PRCreationError(
+                        "Repository requires an issue link but issue creation failed"
+                    )
 
             pr_body = self._build_pr_body(candidate, issue_number)
             self._validate_write(permit, candidate, Capability.GITHUB_CREATE_PR)
@@ -260,26 +265,6 @@ class GitHubPublisher:
                 ) from exc
             raise PRCreationError(f"Failed to create PR: {exc}") from exc
 
-    async def _delete_file(
-        self,
-        owner: str,
-        repo: str,
-        path: str,
-        message: str,
-        branch: str,
-        *,
-        sha: str,
-        signoff: str | None,
-    ) -> None:
-        """Delete a file through the authority-gated GitHub contents endpoint."""
-        if signoff and "Signed-off-by:" not in message:
-            message = f"{message}\n\nSigned-off-by: {signoff}"
-        await self._github._delete(
-            f"/repos/{owner}/{repo}/contents/{path}",
-            authority=self.__write_authority,
-            json={"message": message, "sha": sha, "branch": branch},
-        )
-
     async def _fork_if_needed(
         self,
         username: str,
@@ -291,6 +276,9 @@ class GitHubPublisher:
             existing = await self._github.get_repo_details(username, repo.name)
         except GitHubAPIError as exc:
             if exc.status_code != 404:
+                raise
+        except RuntimeError as exc:
+            if str(exc) != "fork does not exist":
                 raise
         else:
             if existing.owner == username:

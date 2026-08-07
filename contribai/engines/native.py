@@ -134,12 +134,26 @@ class NativeEngineDriver:
             raise EngineBoundaryError("engine request work scope does not match execution lease")
         if request.attempt_id != execution.attempt_id:
             raise EngineBoundaryError("engine request attempt scope does not match execution lease")
-        if request.budget.snapshot().to_json() != execution.budget.snapshot().to_json():
+        request_limits = (
+            request.budget.max_steps,
+            request.budget.max_cost_usd,
+            request.budget.max_wall_time_sec,
+            request.budget.max_tool_failures,
+        )
+        execution_limits = (
+            execution.budget.max_steps,
+            execution.budget.max_cost_usd,
+            execution.budget.max_wall_time_sec,
+            execution.budget.max_tool_failures,
+        )
+        if request_limits != execution_limits:
             raise EngineBoundaryError("engine request budget does not match execution lease")
         workspace = execution.workspace
         if workspace is not None:
             if getattr(workspace, "snapshot_id", None) != execution.workspace_ref:
-                raise EngineBoundaryError("native workspace snapshot does not match execution lease")
+                raise EngineBoundaryError(
+                    "native workspace snapshot does not match execution lease"
+                )
             if getattr(workspace, "attempt_id", None) != execution.attempt_id:
                 raise EngineBoundaryError("native workspace attempt does not match execution lease")
 

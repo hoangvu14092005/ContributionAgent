@@ -228,7 +228,12 @@ class CommandService:
             raise CommandStateError("Publish quota can only be reserved for approved live work")
         if not provider.strip():
             raise ValueError("quota provider must not be empty")
-        amount_json = json.dumps(dict(amount), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        amount_json = json.dumps(
+            dict(amount),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
         expiry = _aware(expires_at) if expires_at else None
         if expiry is not None and expiry <= datetime.now(UTC):
             raise ValueError("quota reservation expiry must be in the future")
@@ -348,7 +353,7 @@ class CommandService:
                 (quota_reservation_id, work_id),
             )
             quota = await quota_cursor.fetchone()
-            if quota is None or str(quota[0]) != "reserved":
+            if quota is None or str(quota[0]) not in {"reserved", "bound"}:
                 raise CommandStateError("PublishPermit requires an active quota reservation")
             if quota[1] is not None and _aware(datetime.fromisoformat(str(quota[1]))) <= now:
                 raise CommandStateError("Publish quota reservation has expired")
@@ -380,14 +385,16 @@ class CommandService:
                 if (
                     str(existing[0]) != patch_sha256
                     or frozenset(
-                        PublishSideEffect(effect)
-                        for effect in json.loads(str(existing[1]) or "[]")
+                        PublishSideEffect(effect) for effect in json.loads(str(existing[1]) or "[]")
                     )
                     != effects
                     or _aware(datetime.fromisoformat(str(existing[2]))) != expiry
                 ):
                     raise CommandStateError("PublishPermit ID conflicts with persisted permit")
                 return permit
+
+        if quota is None or str(quota[0]) != "reserved":
+            raise CommandStateError("New PublishPermit requires a reserved quota")
 
         if item.state is WorkState.APPROVED:
             item = await self._memory.work_items.transition(

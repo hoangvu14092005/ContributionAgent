@@ -84,11 +84,7 @@ class ResourcePolicy:
         never permits raw provider API keys or arbitrary ``*_TOKEN``,
         ``*_SECRET`` or ``*_PASSWORD`` variables.
         """
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not _looks_secret(key)
-        }
+        environment = {key: value for key, value in os.environ.items() if not _looks_secret(key)}
         if extra:
             for key, value in extra.items():
                 scoped = key in _SCOPED_MODEL_ENV_NAMES

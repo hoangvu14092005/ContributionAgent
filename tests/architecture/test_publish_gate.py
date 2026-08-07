@@ -37,6 +37,7 @@ _GITHUB_WRITE_METHODS = frozenset(
         "create_branch",
         "create_issue",
         "create_or_update_file",
+        "delete_file",
         "create_pr_comment",
         "create_pr_review_comment_reply",
         "create_pull_request",

@@ -7,7 +7,6 @@ import uuid
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 
-from contribai.control.mode import ExecutionMode
 from contribai.orchestrator.memory import Memory
 from contribai.publishing.permit import PublishSideEffect
 from contribai.review.models import (
@@ -123,7 +122,7 @@ class ReviewService:
                         {
                             "candidate_hash": candidate_hash,
                             "expires_at": expires_at.isoformat(),
-                            "mode": ExecutionMode.REVIEW_ONLY.value,
+                            "mode": work_item.mode.value,
                         },
                         sort_keys=True,
                     ),
