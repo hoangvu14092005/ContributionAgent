@@ -32,6 +32,16 @@ jobs:
             lint.log
             format.log
           if-no-files-found: ignore
+      - name: Upload source snapshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: source-snapshot
+          path: |
+            contribai
+            tests
+            pyproject.toml
+          include-hidden-files: true
 
   test:
     name: Test (Python ${{ matrix.python-version }})
