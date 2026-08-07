@@ -20,6 +20,7 @@ from contribai.core.middleware import build_default_chain
 from contribai.core.models import (
     AnalysisResult,
     DiscoveryCriteria,
+    Issue,
     PRResult,
     Repository,
 )
@@ -29,6 +30,7 @@ from contribai.github.discovery import RepoDiscovery
 from contribai.github.guidelines import fetch_repo_guidelines
 from contribai.issues.solver import IssueSolver
 from contribai.llm.provider import create_llm_provider
+from contribai.opportunity.engine import OpportunityEngine, OpportunitySource
 from contribai.orchestrator.memory import Memory
 from contribai.orchestrator.review_gate import HumanReviewer, ReviewGate
 from contribai.pr.manager import PRManager
@@ -142,6 +144,7 @@ class ContribPipeline:
         self._review_gate: ReviewGate | None = None
         self._event_bus: EventBus = EventBus()
         self._repo_intel: RepoIntelligence | None = None
+        self._opportunity_engine = OpportunityEngine()
 
     async def _init_components(self):
         """Initialize all pipeline components."""
@@ -1182,8 +1185,9 @@ class ContribPipeline:
         # Initialize issue solver
         solver = IssueSolver(llm=self._llm, github=self._github)
 
-        # Fetch solvable issues
+        # Fetch solvable issues, then rank and persist their read-only opportunity evidence.
         issues = await solver.fetch_solvable_issues(repo, max_issues=max_prs, max_complexity=3)
+        issues = await self._rank_issue_opportunities(repo, issues, max_prs)
 
         if not issues:
             logger.info("No solvable issues found in %s", repo.full_name)
@@ -1339,6 +1343,44 @@ class ContribPipeline:
 
         result.repos_analyzed = 1
         return result
+
+    async def _rank_issue_opportunities(
+        self, repo: Repository, issues: list[Issue], max_candidates: int
+    ) -> list[Issue]:
+        """Rank issue candidates without crossing into the write pipeline."""
+        profile: RepoProfile | None = None
+        if self._repo_intel is not None:
+            try:
+                profile = await self._repo_intel.profile(repo.owner, repo.name)
+            except Exception as e:
+                logger.debug("Opportunity repo profile failed for %s: %s", repo.full_name, e)
+
+        candidates = self._opportunity_engine.rank(
+            repo,
+            issues=issues,
+            profile=profile,
+            max_candidates=max_candidates,
+        )
+        issue_candidates = [
+            candidate for candidate in candidates if candidate.source is OpportunitySource.ISSUE
+        ]
+
+        record_score = getattr(self._memory, "record_opportunity_score", None)
+        if record_score is not None:
+            for candidate in issue_candidates:
+                try:
+                    await record_score(candidate)
+                except Exception as e:
+                    logger.debug(
+                        "Could not persist opportunity score for %s #%s: %s",
+                        repo.full_name,
+                        candidate.issue_number,
+                        e,
+                    )
+
+        return [
+            candidate.task for candidate in issue_candidates if isinstance(candidate.task, Issue)
+        ]
 
     def _identify_key_files(self, file_tree: list, repo: Repository) -> list[str]:
         """Identify key files in a repo for building context.

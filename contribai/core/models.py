@@ -77,6 +77,9 @@ class Issue(BaseModel):
     title: str
     body: str | None = None
     labels: list[str] = Field(default_factory=list)
+    assignees: list[str] = Field(default_factory=list)
+    comments: int = 0
+    reactions: int = 0
     state: str = "open"
     created_at: datetime | None = None
     html_url: str = ""

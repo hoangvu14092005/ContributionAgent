@@ -7,6 +7,7 @@ to avoid duplicate work and improve over time.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -101,6 +102,20 @@ CREATE TABLE IF NOT EXISTS working_memory (
     expires_at  TEXT,
     UNIQUE(repo, key)
 );
+
+CREATE TABLE IF NOT EXISTS opportunity_scores (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo            TEXT NOT NULL,
+    issue_number    INTEGER,
+    source          TEXT NOT NULL,
+    expected_value  REAL NOT NULL,
+    score_json      TEXT NOT NULL,
+    evidence_json   TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_opportunity_scores_repo
+ON opportunity_scores(repo, created_at);
 """
 
 
@@ -181,6 +196,56 @@ class Memory:
         rows = await cursor.fetchall()
         cols = [d[0] for d in cursor.description]
         return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def record_opportunity_score(self, candidate) -> int:
+        """Persist score and evidence so ranking decisions remain explainable."""
+        score = candidate.score
+        evidence = [
+            {"feature": item.feature, "value": item.value, "rationale": item.rationale}
+            for item in score.evidence
+        ]
+        score_payload = {
+            "probability_correct_patch": score.probability_correct_patch,
+            "probability_maintainer_wants": score.probability_maintainer_wants,
+            "probability_merge": score.probability_merge,
+            "impact": score.impact,
+            "cost": score.cost,
+            "risk_penalty": score.risk_penalty,
+            "spam_penalty": score.spam_penalty,
+            "expected_value": score.expected_value,
+        }
+        async with self._transaction_lock:
+            cursor = await self._db.execute(
+                """INSERT INTO opportunity_scores
+                   (repo, issue_number, source, expected_value, score_json,
+                    evidence_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    candidate.repo,
+                    candidate.issue_number,
+                    candidate.source.value,
+                    score.expected_value,
+                    json.dumps(score_payload, sort_keys=True),
+                    json.dumps(evidence, sort_keys=True),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            await self._db.commit()
+            return int(cursor.lastrowid)
+
+    async def get_opportunity_scores(self, repo: str, limit: int = 50) -> list[dict]:
+        """Read persisted opportunity scores and their evidence."""
+        cursor = await self._db.execute(
+            "SELECT * FROM opportunity_scores WHERE repo = ? ORDER BY created_at DESC LIMIT ?",
+            (repo, limit),
+        )
+        rows = await cursor.fetchall()
+        cols = [description[0] for description in cursor.description]
+        values = [dict(zip(cols, row, strict=False)) for row in rows]
+        for value in values:
+            value["score"] = json.loads(value.pop("score_json"))
+            value["evidence"] = json.loads(value.pop("evidence_json"))
+        return values
 
     # ── PRs ────────────────────────────────────────────────────────────────
 
