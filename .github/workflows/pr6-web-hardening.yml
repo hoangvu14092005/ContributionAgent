@@ -1,0 +1,81 @@
+name: PR6 Web Hardening
+
+on:
+  push:
+    branches: [agent/fix-pr5-control-plane-blockers]
+
+permissions:
+  contents: write
+
+jobs:
+  harden-web:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/fix-pr5-control-plane-blockers
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Patch live web queueing and tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              if new in text:
+                  return
+              if old not in text:
+                  raise RuntimeError(f"missing snippet in {path}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          replace_once(
+              "contribai/web/server.py",
+              '''    if request.mode is ExecutionMode.LIVE:\n        require_configured_api_key(presented_key)\n    background_tasks.add_task(_background_run, None, request.mode)\n    return {"status": "started", "mode": request.mode}\n''',
+              '''    if request.mode is ExecutionMode.LIVE:\n        require_configured_api_key(presented_key)\n        config = _config or load_config()\n        item = await _submit_control_command(config, None, request.mode, source="web.run")\n        if item is None:\n            raise HTTPException(status_code=503, detail="control plane is not initialized")\n        return {"status": "queued", "mode": request.mode, "work_id": item.id}\n    background_tasks.add_task(_background_run, None, request.mode)\n    return {"status": "started", "mode": request.mode}\n''',
+          )
+          replace_once(
+              "contribai/web/server.py",
+              '''    if request.mode is ExecutionMode.LIVE:\n        require_configured_api_key(presented_key)\n    background_tasks.add_task(_background_run, request.repo_url, request.mode)\n    return {\n        "status": "started",\n        "repo_url": request.repo_url,\n        "mode": request.mode,\n    }\n''',
+              '''    if request.mode is ExecutionMode.LIVE:\n        require_configured_api_key(presented_key)\n        config = _config or load_config()\n        item = await _submit_control_command(\n            config, request.repo_url, request.mode, source="web.run"\n        )\n        if item is None:\n            raise HTTPException(status_code=503, detail="control plane is not initialized")\n        return {\n            "status": "queued",\n            "repo_url": request.repo_url,\n            "mode": request.mode,\n            "work_id": item.id,\n        }\n    background_tasks.add_task(_background_run, request.repo_url, request.mode)\n    return {\n        "status": "started",\n        "repo_url": request.repo_url,\n        "mode": request.mode,\n    }\n''',
+          )
+
+          p = Path("tests/web/test_server_safety.py")
+          tests = p.read_text(encoding="utf-8")
+          tests = tests.replace(
+              '''    background_run = AsyncMock()\n    with patch("contribai.web.server._background_run", background_run):\n        response = TestClient(app).post(path, json=payload, headers=headers)\n    return response, background_run\n''',
+              '''    background_run = AsyncMock()\n    queued_item = MagicMock(id="work-queued")\n    with (\n        patch("contribai.web.server._background_run", background_run),\n        patch(\n            "contribai.web.server._submit_control_command",\n            AsyncMock(return_value=queued_item),\n        ),\n    ):\n        response = TestClient(app).post(path, json=payload, headers=headers)\n    return response, background_run\n''',
+          )
+          tests = tests.replace(
+              '''    assert response.status_code == 200\n    assert response.json() == {"status": "started", "mode": "live"}\n    assert background_run.await_args.args == (None, "live")\n''',
+              '''    assert response.status_code == 200\n    assert response.json() == {\n        "status": "queued",\n        "mode": "live",\n        "work_id": "work-queued",\n    }\n    background_run.assert_not_awaited()\n''',
+          )
+          tests = tests.replace(
+              '''@pytest.mark.parametrize(\n    ("mode", "expected_dry_run"),\n    [("shadow", True), ("review_only", True), ("live", False)],\n)\n''',
+              '''@pytest.mark.parametrize(\n    ("mode", "expected_dry_run"),\n    [("shadow", True), ("review_only", True)],\n)\n''',
+          )
+          extra = '''\n\ndef test_live_rejects_api_key_in_query_string():\n    configure_auth(["valid-key"])\n    response, background_run = _post(\n        "/api/run?api_key=valid-key", {"mode": "live"}\n    )\n    assert response.status_code == 401\n    background_run.assert_not_awaited()\n\n\n@pytest.mark.asyncio\nasync def test_background_live_queues_without_legacy_pipeline():\n    pipeline = MagicMock()\n    pipeline.run = AsyncMock()\n    with (\n        patch("contribai.web.server.load_config", return_value=MagicMock()),\n        patch("contribai.web.server.ContribPipeline", return_value=pipeline),\n        patch(\n            "contribai.web.server._submit_control_command",\n            AsyncMock(return_value=MagicMock(id="work-live")),\n        ),\n    ):\n        from contribai.web.server import _background_run\n        await _background_run(None, "live")\n    pipeline.run.assert_not_awaited()\n'''
+          if "test_live_rejects_api_key_in_query_string" not in tests:
+              tests += extra
+          p.write_text(tests, encoding="utf-8")
+          PY
+      - name: Validate web hardening
+        run: |
+          pip install -e ".[dev,mcp]"
+          ruff format contribai/web/server.py tests/web/test_server_safety.py
+          ruff check contribai/web/auth.py contribai/web/server.py
+          pytest -q tests/web/test_server_safety.py tests/web/test_webhooks.py
+          python -m compileall -q contribai/web
+      - name: Commit web hardening
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add contribai/web/server.py tests/web/test_server_safety.py
+          git commit -m "fix: persist live web queue before response"
+          git push origin HEAD:agent/fix-pr5-control-plane-blockers
