@@ -1,0 +1,62 @@
+"""Fail-closed capability policy evaluation."""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from fnmatch import fnmatchcase
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from contribai.publishing.capability import Capability, CapabilityRequest
+
+
+class PolicyDecision(StrEnum):
+    """Outcomes returned by the policy engine."""
+
+    ALLOW = "allow"
+    ASK = "ask"
+    DENY = "deny"
+
+
+class PolicyRule(BaseModel):
+    """A capability decision scoped to one actor and resource pattern."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    actor: str
+    capability: Capability
+    resource: str
+    decision: PolicyDecision
+
+
+class CapabilityPolicy(BaseModel):
+    """Configured capability rules, with an implicit deny default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rules: list[PolicyRule] = Field(default_factory=list)
+
+
+class PolicyEngine:
+    """Evaluate capability requests deterministically and fail closed."""
+
+    def __init__(self, policy: CapabilityPolicy | None = None) -> None:
+        self._policy = policy or CapabilityPolicy()
+
+    def evaluate(self, request: CapabilityRequest) -> PolicyDecision:
+        """Return the exact rule decision, then a pattern decision, or deny."""
+        applicable_rules = [
+            rule
+            for rule in self._policy.rules
+            if rule.actor == request.actor and rule.capability == request.capability
+        ]
+
+        for rule in applicable_rules:
+            if rule.resource == request.resource:
+                return rule.decision
+
+        for rule in applicable_rules:
+            if fnmatchcase(request.resource, rule.resource):
+                return rule.decision
+
+        return PolicyDecision.DENY

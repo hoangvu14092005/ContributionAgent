@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from contribai.core.exceptions import ConfigError
+from contribai.publishing.policy import CapabilityPolicy
 
 
 class GitHubConfig(BaseModel):
@@ -262,6 +263,7 @@ class ContribAIConfig(BaseModel):
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     multi_model: MultiModelConfig = Field(default_factory=MultiModelConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    capability_policy: CapabilityPolicy = Field(default_factory=CapabilityPolicy)
 
 
 def _expand_env_vars(obj):
