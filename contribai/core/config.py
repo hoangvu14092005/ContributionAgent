@@ -266,6 +266,18 @@ class SandboxConfig(BaseModel):
     docker_image: str = ""  # override default language image
 
 
+class EngineConfig(BaseModel):
+    """Coding-engine runtime policy and version pin configuration."""
+
+    enabled: list[str] = Field(default_factory=lambda: ["native"])
+    production: bool = False
+    deny_unpinned: bool = True
+    required_live_capabilities: list[str] = Field(
+        default_factory=lambda: ["cancellation", "sandbox", "model_gateway"]
+    )
+    version_policies: dict[str, dict[str, str | bool]] = Field(default_factory=dict)
+
+
 class ContribAIConfig(BaseModel):
     """Root configuration for ContribAIConfig."""
 
@@ -282,6 +294,7 @@ class ContribAIConfig(BaseModel):
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     multi_model: MultiModelConfig = Field(default_factory=MultiModelConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    engines: EngineConfig = Field(default_factory=EngineConfig)
     capability_policy: CapabilityPolicy = Field(default_factory=CapabilityPolicy)
 
 

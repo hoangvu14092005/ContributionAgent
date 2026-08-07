@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from contribai.engines.capabilities import EngineCapabilities, VersionPolicy
 from contribai.engines.protocol import EngineDriver
 from contribai.publishing.capability import Capability, CapabilityRequest
 from contribai.publishing.policy import PolicyDecision, PolicyEngine
@@ -59,6 +60,8 @@ class EngineRegistration:
     policy_capabilities: frozenset[Capability] = frozenset()
     live_supported: bool = True
     priority: int = 0
+    capability_snapshot: EngineCapabilities | None = None
+    version_policy: VersionPolicy | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -78,8 +81,14 @@ class EngineRegistration:
 class EngineRouter:
     """Choose a driver without acquiring any workspace or GitHub write capability."""
 
-    def __init__(self, *, policy_engine: PolicyEngine | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        policy_engine: PolicyEngine | None = None,
+        require_pinned_live: bool = True,
+    ) -> None:
         self._policy_engine = policy_engine
+        self._require_pinned_live = require_pinned_live
         self._registrations: dict[str, EngineRegistration] = {}
 
     @property
@@ -98,6 +107,8 @@ class EngineRouter:
         policy_capabilities: Iterable[Capability | str] = (),
         live_supported: bool = True,
         priority: int = 0,
+        capability_snapshot: EngineCapabilities | None = None,
+        version_policy: VersionPolicy | None = None,
     ) -> EngineRegistration:
         """Register or replace one driver descriptor."""
         registration = EngineRegistration(
@@ -110,6 +121,8 @@ class EngineRouter:
             policy_capabilities=frozenset(Capability(value) for value in policy_capabilities),
             live_supported=live_supported,
             priority=priority,
+            capability_snapshot=capability_snapshot,
+            version_policy=version_policy,
         )
         self._registrations[name] = registration
         return registration
@@ -125,6 +138,7 @@ class EngineRouter:
         mode: RoutingMode = RoutingMode.SHADOW,
         work_id: str = "router",
         resource: str = "workspace",
+        capability_snapshot: EngineCapabilities | None = None,
     ) -> EngineDriver:
         """Return the cheapest safe matching driver, or fail closed."""
         request = request or EngineRoutingRequest(
@@ -139,7 +153,7 @@ class EngineRouter:
         eligible = [
             registration
             for registration in self._registrations.values()
-            if self._matches(registration, request)
+            if self._matches(registration, request, capability_snapshot=capability_snapshot)
         ]
         if not eligible:
             raise EngineRoutingError(
@@ -182,6 +196,8 @@ class EngineRouter:
         self,
         registration: EngineRegistration,
         request: EngineRoutingRequest,
+        *,
+        capability_snapshot: EngineCapabilities | None = None,
     ) -> bool:
         if request.complexity > registration.max_complexity:
             return False
@@ -192,6 +208,26 @@ class EngineRouter:
         if not request.required_capabilities.issubset(registration.capabilities):
             return False
         if request.mode == RoutingMode.LIVE and not registration.live_supported:
+            return False
+        snapshot = capability_snapshot or registration.capability_snapshot
+        if (
+            request.mode == RoutingMode.LIVE
+            and self._require_pinned_live
+            and (snapshot is None or registration.version_policy is None)
+        ):
+            return False
+        if registration.version_policy and (
+            snapshot is None
+            or not registration.version_policy.accepts(
+                snapshot, live=request.mode == RoutingMode.LIVE
+            )
+        ):
+            return False
+        if snapshot and any(
+            not snapshot.supports(capability) for capability in request.required_capabilities
+        ):
+            return False
+        if request.mode == RoutingMode.LIVE and snapshot and not snapshot.supports_live:
             return False
         if self._policy_engine:
             for capability in registration.policy_capabilities:
