@@ -34,6 +34,12 @@ _SCOPED_MODEL_ENV_NAMES = frozenset(
         "CONTRIBAI_MODEL_GATEWAY_LEASE_ID",
     }
 )
+_SECRET_SUFFIXES = ("_TOKEN", "_API_KEY", "_SECRET", "_PASSWORD")
+
+
+def _looks_secret(name: str) -> bool:
+    upper = name.upper()
+    return upper in _SECRET_ENV_NAMES or upper.endswith(_SECRET_SUFFIXES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,24 +80,22 @@ class ResourcePolicy:
         """Return an environment without host credentials or socket handles.
 
         ``allow_scoped_model_credentials`` permits only the exact
-        ``CONTRIBAI_MODEL_GATEWAY_*`` names issued by an execution lease.  It
-        never permits provider API keys or arbitrary ``*_TOKEN`` variables.
+        ``CONTRIBAI_MODEL_GATEWAY_*`` names issued by an execution lease. It
+        never permits raw provider API keys or arbitrary ``*_TOKEN``,
+        ``*_SECRET`` or ``*_PASSWORD`` variables.
         """
         environment = {
             key: value
             for key, value in os.environ.items()
-            if key not in _SECRET_ENV_NAMES
-            and not key.endswith("_TOKEN")
-            and not key.endswith("_API_KEY")
+            if not _looks_secret(key)
         }
         if extra:
             for key, value in extra.items():
                 scoped = key in _SCOPED_MODEL_ENV_NAMES
-                if (
-                    key in _SECRET_ENV_NAMES
-                    or key.endswith("_API_KEY")
-                    or (scoped and not allow_scoped_model_credentials)
-                ):
+                if scoped:
+                    if not allow_scoped_model_credentials:
+                        raise ValueError(f"scoped model credential is not allowed: {key}")
+                elif _looks_secret(key):
                     raise ValueError(f"raw credential environment is not allowed: {key}")
                 environment[key] = value
         return environment
