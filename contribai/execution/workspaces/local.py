@@ -280,8 +280,29 @@ class LocalWorkspace:
             )
             if returncode != 0:
                 raise WorkspaceError(stderr.strip() or "git deleted-file diff failed")
+            returncode, numstat, stderr = await self._git_output(
+                "diff",
+                "--numstat",
+                self._base_sha,
+                "--",
+            )
+            if returncode != 0:
+                raise WorkspaceError(stderr.strip() or "git binary-file diff failed")
+
             added_files = tuple(sorted(set(added.splitlines()) & set(changed)))
             deleted_files = tuple(sorted(set(deleted.splitlines()) & set(changed)))
+            binary_files = tuple(
+                sorted(
+                    {
+                        parts[2].strip()
+                        for line in numstat.splitlines()
+                        if len(parts := line.split("\t", 2)) == 3
+                        and parts[0] == "-"
+                        and parts[1] == "-"
+                    }
+                    & set(changed)
+                )
+            )
             return WorkspaceDiff(
                 base_sha=self._base_sha,
                 snapshot_id=self._snapshot_id,
@@ -290,6 +311,7 @@ class LocalWorkspace:
                 changed_files=changed,
                 added_files=added_files,
                 deleted_files=deleted_files,
+                binary_files=binary_files,
                 status="VERIFIED",
                 diff_hash=compute_diff_hash(
                     base_sha=self._base_sha,
