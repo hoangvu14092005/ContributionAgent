@@ -640,6 +640,12 @@ def create_llm_provider(
                      MultiModelProvider for per-task model routing
         strategy: Routing strategy (performance/balanced/economy)
     """
+    if config.model_gateway_required:
+        raise LLMError(
+            "model gateway is required for this provider; use ModelGateway "
+            "instead of raw provider access"
+        )
+
     # ── Fallback chain takes priority over multi-model ─────────────────────
     if config.fallback_enabled and config.fallback_chains:
         from contribai.llm.fallback import (

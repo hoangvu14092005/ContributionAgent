@@ -73,11 +73,16 @@ class LLMConfig(BaseModel):
     #       - {provider: rocket-free-1, base_url: ..., model: kilo-auto/free}
     fallback_chains: dict[str, list[dict]] = Field(default_factory=dict)
     fallback_enabled: bool = False  # Master switch for fallback mechanism
+    # Model gateway boundary. Raw keys are resolved only for control-plane use
+    # when this flag is enabled; execution engines must call ModelGateway.
+    model_gateway_required: bool = False
+    model_gateway_url: str = ""
+    allowed_model_providers: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def resolve_api_key_and_defaults(self):
         """Fallback: env vars for API keys + default model per provider."""
-        if not self.api_key:
+        if not self.api_key and not self.model_gateway_required:
             env_map = {
                 "gemini": "GEMINI_API_KEY",
                 "openai": "OPENAI_API_KEY",

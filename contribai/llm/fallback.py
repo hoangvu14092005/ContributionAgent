@@ -114,6 +114,9 @@ def _create_provider_for_slot(slot: ProviderSlot, base_config: LLMConfig):
     Handles provider-specific protocol differences (Copilot uses ``/chat/completions``
     with a special token, custom endpoints use OpenAI SDK, etc.).
     """
+    if base_config.model_gateway_required:
+        raise LLMError("fallback providers cannot bypass the required model gateway")
+
     from contribai.llm.provider import (
         CustomProvider,
         OpenAIProvider,
