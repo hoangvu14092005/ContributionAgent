@@ -1,13 +1,13 @@
 """Optional in-process mini-SWE-agent driver.
 
-The adapter intentionally accepts an injected runner/agent factory.  This
-keeps the core package independent from mini-SWE's optional release cadence
-and lets deployments prove the exact binding version before enabling it.
+In-process third-party agent code is never auto-imported. A deployment that
+chooses this adapter must inject a reviewed runner/factory explicitly; otherwise
+the driver fails closed. This prevents an installed SDK from silently inheriting
+the control-plane process' host filesystem, network and environment authority.
 """
 
 from __future__ import annotations
 
-import importlib
 from collections.abc import Callable
 from typing import Any
 
@@ -22,7 +22,7 @@ from contribai.execution.workspaces.base import Workspace
 
 
 class MiniSWEInProcessDriver(ExternalEngineDriver):
-    """Run mini-SWE inside the outer ContribAI workspace boundary."""
+    """Run an explicitly injected mini-SWE binding against the outer workspace."""
 
     engine_name = "mini-swe"
     engine_version = "mini-swe@optional"
@@ -61,12 +61,11 @@ class MiniSWEInProcessDriver(ExternalEngineDriver):
                 ),
                 execution,
             )
-        factory = self._agent_factory
-        if factory is None:
-            factory = self._discover_agent_factory()
+
+        factory = self._agent_factory or self._factory_from_explicit_module()
         if factory is None:
             raise AdapterUnavailableError(
-                "mini-SWE binding is unavailable or does not expose a safe agent factory"
+                "mini-SWE requires an explicitly injected reviewed runner or agent factory"
             )
         agent = await invoke_callback(
             factory,
@@ -75,7 +74,7 @@ class MiniSWEInProcessDriver(ExternalEngineDriver):
             workspace=workspace,
             prompt=prompt,
         )
-        if isinstance(agent, (dict,)) or agent is None:
+        if isinstance(agent, dict) or agent is None:
             return agent
         run_method = getattr(agent, "run", None)
         if run_method is None:
@@ -113,15 +112,9 @@ class MiniSWEInProcessDriver(ExternalEngineDriver):
             f"{request.context.to_prompt()}"
         )
 
-    def _discover_agent_factory(self) -> Callable[..., object] | None:
+    def _factory_from_explicit_module(self) -> Callable[..., object] | None:
+        """Use only a module object supplied explicitly by trusted application code."""
         module = self._binding_module
-        if module is None:
-            for name in ("minisweagent", "mini_swe_agent"):
-                try:
-                    module = importlib.import_module(name)
-                except ImportError:
-                    continue
-                break
         if module is None:
             return None
         for name in ("create_agent", "DefaultAgent", "Agent"):
