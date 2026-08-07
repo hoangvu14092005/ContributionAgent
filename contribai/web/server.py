@@ -9,15 +9,17 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, Depends, FastAPI
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
 from fastapi.responses import HTMLResponse
 
 from contribai import __version__
+from contribai.control.mode import ExecutionMode
 from contribai.core.config import ContribAIConfig, load_config
 from contribai.orchestrator.memory import Memory
 from contribai.orchestrator.pipeline import ContribPipeline
-from contribai.web.auth import configure_auth, verify_api_key
+from contribai.web.auth import configure_auth, get_presented_api_key, require_configured_api_key
 from contribai.web.dashboard import render_dashboard
+from contribai.web.schemas import RunRequest
 from contribai.web.webhooks import configure_webhooks
 from contribai.web.webhooks import router as webhook_router
 
@@ -31,12 +33,14 @@ async def _webhook_event_handler(
     event_type: str,
     action: str,
     repo_url: str,
+    mode: ExecutionMode,
 ):
     """Handle webhook events by running pipeline."""
+    mode = ExecutionMode(mode)
     config = load_config()
     pipeline = ContribPipeline(config)
     try:
-        result = await pipeline.run_single(repo_url, dry_run=False)
+        result = await pipeline.run_single(repo_url, dry_run=mode.dry_run)
         logger.info(
             "Webhook-triggered run: %d PRs for %s",
             result.prs_created,
@@ -62,7 +66,9 @@ async def lifespan(app: FastAPI):
 
     # Configure webhooks
     configure_webhooks(
+        enabled=_config.web.webhook_enabled,
         secret=_config.web.webhook_secret,
+        mode=_config.web.webhook_mode,
         on_event=_webhook_event_handler,
     )
 
@@ -124,18 +130,19 @@ async def get_runs(limit: int = 20):
     return await _memory.get_run_history(limit=limit)
 
 
-# ── Protected endpoints (require API key) ────────────
+# ── Execution endpoints (live mode requires API key) ─
 
 
-async def _background_run(repo_url: str | None, dry_run: bool):
+async def _background_run(repo_url: str | None, mode: ExecutionMode):
     """Execute pipeline in background."""
+    mode = ExecutionMode(mode)
     config = load_config()
     pipeline = ContribPipeline(config)
     try:
         if repo_url:
-            result = await pipeline.run_single(repo_url, dry_run=dry_run)
+            result = await pipeline.run_single(repo_url, dry_run=mode.dry_run)
         else:
-            result = await pipeline.run(dry_run=dry_run)
+            result = await pipeline.run(dry_run=mode.dry_run)
         logger.info(
             "Background run: %d repos, %d PRs",
             result.repos_analyzed,
@@ -148,29 +155,35 @@ async def _background_run(repo_url: str | None, dry_run: bool):
 @app.post("/api/run")
 async def trigger_run(
     background_tasks: BackgroundTasks,
-    dry_run: bool = False,
-    _key: str | None = Depends(verify_api_key),
+    request: RunRequest,
+    presented_key: str | None = Depends(get_presented_api_key),
 ):
-    """Trigger a pipeline run (auth required)."""
-    background_tasks.add_task(_background_run, None, dry_run)
-    return {"status": "started", "dry_run": dry_run}
+    """Trigger a pipeline run with an explicit execution mode."""
+    if request.mode is ExecutionMode.LIVE:
+        require_configured_api_key(presented_key)
+    background_tasks.add_task(_background_run, None, request.mode)
+    return {"status": "started", "mode": request.mode}
 
 
 @app.post("/api/run/target")
 async def trigger_target(
     background_tasks: BackgroundTasks,
-    repo_url: str = "",
-    dry_run: bool = False,
-    _key: str | None = Depends(verify_api_key),
+    request: RunRequest,
+    presented_key: str | None = Depends(get_presented_api_key),
 ):
-    """Target a specific repo (auth required)."""
-    if not repo_url:
-        return {"error": "repo_url is required"}, 400
-    background_tasks.add_task(_background_run, repo_url, dry_run)
+    """Target a specific repo with an explicit execution mode."""
+    if not request.repo_url:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="repo_url is required",
+        )
+    if request.mode is ExecutionMode.LIVE:
+        require_configured_api_key(presented_key)
+    background_tasks.add_task(_background_run, request.repo_url, request.mode)
     return {
         "status": "started",
-        "repo_url": repo_url,
-        "dry_run": dry_run,
+        "repo_url": request.repo_url,
+        "mode": request.mode,
     }
 
 

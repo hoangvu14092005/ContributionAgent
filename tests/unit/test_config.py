@@ -2,8 +2,10 @@
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from contribai.core.config import ContribAIConfig, LLMConfig, load_config
+from contribai.control.mode import ExecutionMode
+from contribai.core.config import ContribAIConfig, LLMConfig, WebConfig, load_config
 from contribai.core.exceptions import ConfigError
 
 
@@ -25,6 +27,17 @@ class TestContribAIConfig:
     def test_ollama_defaults(self):
         config = LLMConfig(provider="ollama")
         assert config.model == "codellama:13b"
+
+    def test_webhook_defaults_fail_closed(self):
+        config = WebConfig()
+
+        assert config.webhook_enabled is False
+        assert config.webhook_mode is ExecutionMode.SHADOW
+
+    def test_enabled_webhook_requires_secret(self):
+        for secret in ("", "   "):
+            with pytest.raises(ValidationError, match="webhook_secret"):
+                WebConfig(webhook_enabled=True, webhook_secret=secret)
 
 
 class TestLoadConfig:

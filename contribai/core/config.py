@@ -10,6 +10,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from contribai.control.mode import ExecutionMode
 from contribai.core.exceptions import ConfigError
 from contribai.publishing.policy import CapabilityPolicy
 
@@ -55,7 +56,7 @@ class LLMConfig(BaseModel):
     # Vertex AI (Google Cloud)
     vertex_project: str = ""
     vertex_location: str = "global"
-    
+
     # Custom self-hosted models per task (env var configurable)
     custom_models: dict[str, str] = Field(default_factory=dict)
     custom_base_url: str = ""
@@ -86,11 +87,13 @@ class LLMConfig(BaseModel):
             env_var = env_map.get(self.provider, "")
             if env_var:
                 self.api_key = os.environ.get(env_var, "")
-        
+
         # Custom base URL from env
         if not self.custom_base_url:
-            self.custom_base_url = os.environ.get("CUSTOM_LLM_BASE_URL", "http://localhost:20128/v1")
-        
+            self.custom_base_url = os.environ.get(
+                "CUSTOM_LLM_BASE_URL", "http://localhost:20128/v1"
+            )
+
         # Custom models per task from env vars
         if not self.custom_models:
             self.custom_models = {
@@ -102,7 +105,7 @@ class LLMConfig(BaseModel):
                 "compression": os.environ.get("LLM_MODEL_COMPRESSION", "gh/claude-sonnet-4.6"),
                 "default": os.environ.get("LLM_MODEL_DEFAULT", "gh/claude-sonnet-4.6"),
             }
-        
+
         # Vertex AI: project from env
         if not self.vertex_project:
             self.vertex_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
@@ -194,7 +197,16 @@ class WebConfig(BaseModel):
     port: int = 8787
     enabled: bool = True
     api_keys: list[str] = Field(default_factory=list)
+    webhook_enabled: bool = False
     webhook_secret: str = ""
+    webhook_mode: ExecutionMode = ExecutionMode.SHADOW
+
+    @model_validator(mode="after")
+    def validate_webhook_secret(self):
+        """Reject enabled webhook receivers without an HMAC secret."""
+        if self.webhook_enabled and not self.webhook_secret.strip():
+            raise ValueError("webhook_secret is required when webhook_enabled is true")
+        return self
 
 
 class PipelineConfig(BaseModel):
@@ -268,17 +280,19 @@ class ContribAIConfig(BaseModel):
 
 def _expand_env_vars(obj):
     """Recursively expand ``${VAR}`` and ``${VAR:-default}`` in config values."""
-    import re
     import os
+    import re
 
     pattern = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 
     def _expand(value):
         if isinstance(value, str):
+
             def replacer(match):
                 var_name = match.group(1)
                 default = match.group(2)
                 return os.environ.get(var_name, default if default is not None else "")
+
             return pattern.sub(replacer, value)
         elif isinstance(value, dict):
             return {k: _expand(v) for k, v in value.items()}
