@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 
 from contribai.core.exceptions import PRCreationError
 from contribai.core.models import Contribution, ContributionType, PRResult, PRStatus, Repository
-from contribai.github.client import GitHubClient
+from contribai.github.client import GitHubClient, _issue_github_write_authority
 from contribai.github.guidelines import adapt_pr_body
 from contribai.pr.manager import PRManager
 from contribai.publishing.capability import GITHUB_PUBLISHER_ACTOR, Capability, CapabilityRequest
@@ -43,6 +43,7 @@ class GitHubPublisher:
         self._idempotency_store = idempotency_store or InMemoryIdempotencyStore()
         self._clock = clock or (lambda: datetime.now(UTC))
         self._pr_manager = PRManager(github)
+        self.__write_authority = _issue_github_write_authority(github, self)
 
     async def publish(self, permit: PublishPermit, candidate: PublishCandidate) -> PRResult:
         """Publish a candidate only after validating permit, policy, and identity."""
@@ -50,13 +51,13 @@ class GitHubPublisher:
         self._authorize_publish(permit, candidate)
         key = IdempotencyKey(
             work_id=permit.work_id,
-            repo=permit.repo,
-            base_sha=permit.base_sha,
-            patch_sha256=permit.patch_sha256,
+            repo=candidate.repo,
+            base_sha=candidate.base_sha,
+            patch_sha256=candidate.patch_sha256,
         )
         return await self._idempotency_store.execute(
             key,
-            lambda: self._publish_once(candidate),
+            lambda: self._publish_once(permit, candidate),
         )
 
     def _validate_permit(self, permit: PublishPermit, candidate: PublishCandidate) -> None:
@@ -93,20 +94,42 @@ class GitHubPublisher:
 
         resource = f"repositories/{permit.repo}"
         for capability in capabilities:
-            request = CapabilityRequest(
-                actor=GITHUB_PUBLISHER_ACTOR,
-                capability=capability,
-                resource=resource,
-                work_id=permit.work_id,
-            )
-            decision = self._policy_engine.evaluate(request)
-            if decision is not PolicyDecision.ALLOW:
-                raise PublishPolicyError(
-                    f"Policy decision {decision.value!r} blocks {capability.value} "
-                    f"for {permit.repo}"
-                )
+            self._authorize_capability(permit, capability, resource=resource)
 
-    async def _publish_once(self, candidate: PublishCandidate) -> PRResult:
+    def _authorize_capability(
+        self,
+        permit: PublishPermit,
+        capability: Capability,
+        *,
+        resource: str | None = None,
+    ) -> None:
+        request = CapabilityRequest(
+            actor=GITHUB_PUBLISHER_ACTOR,
+            capability=capability,
+            resource=resource or f"repositories/{permit.repo}",
+            work_id=permit.work_id,
+        )
+        decision = self._policy_engine.evaluate(request)
+        if decision is not PolicyDecision.ALLOW:
+            raise PublishPolicyError(
+                f"Policy decision {decision.value!r} blocks {capability.value} for {permit.repo}"
+            )
+
+    def _validate_write(
+        self,
+        permit: PublishPermit,
+        candidate: PublishCandidate,
+        capability: Capability,
+    ) -> None:
+        """Revalidate all permit bindings and policy immediately before a write."""
+        self._validate_permit(permit, candidate)
+        self._authorize_capability(permit, capability)
+
+    async def _publish_once(
+        self,
+        permit: PublishPermit,
+        candidate: PublishCandidate,
+    ) -> PRResult:
         contribution = candidate.contribution
         target_repo = candidate.target_repo
         user = await self._github.get_authenticated_user()
@@ -114,13 +137,15 @@ class GitHubPublisher:
         signoff = self._pr_manager._build_signoff(user)
 
         try:
-            fork = await self._fork_if_needed(username, target_repo)
+            fork = await self._fork_if_needed(username, target_repo, permit, candidate)
             branch = contribution.branch_name or self._pr_manager._human_branch_name(contribution)
+            self._validate_write(permit, candidate, Capability.GITHUB_PUSH)
             await self._github.create_branch(
                 fork.owner,
                 fork.name,
                 branch,
                 base_sha=candidate.base_sha,
+                authority=self.__write_authority,
             )
 
             for change in contribution.changes + contribution.tests_added:
@@ -136,6 +161,7 @@ class GitHubPublisher:
                     except Exception:
                         sha = None
 
+                self._validate_write(permit, candidate, Capability.GITHUB_PUSH)
                 await self._github.create_or_update_file(
                     fork.owner,
                     fork.name,
@@ -143,21 +169,29 @@ class GitHubPublisher:
                     change.new_content,
                     contribution.commit_message,
                     branch,
+                    authority=self.__write_authority,
                     sha=sha,
                     signoff=signoff,
                 )
 
             issue_number = candidate.closes_issue
             if issue_number is None and self._requires_linked_issue(candidate):
-                issue_number = await self._create_issue_for_finding(contribution, target_repo)
+                issue_number = await self._create_issue_for_finding(
+                    permit,
+                    candidate,
+                    contribution,
+                    target_repo,
+                )
 
             pr_body = self._build_pr_body(candidate, issue_number)
+            self._validate_write(permit, candidate, Capability.GITHUB_CREATE_PR)
             pr_data = await self._github.create_pull_request(
                 target_repo.owner,
                 target_repo.name,
                 title=contribution.title,
                 body=pr_body,
                 head=f"{fork.owner}:{branch}",
+                authority=self.__write_authority,
                 base=target_repo.default_branch,
             )
             result = PRResult(
@@ -171,6 +205,8 @@ class GitHubPublisher:
             )
             logger.info("PR #%d created through publisher: %s", result.pr_number, result.pr_url)
             return result
+        except (PublishPermitError, PublishPolicyError):
+            raise
         except Exception as exc:
             if isinstance(exc, PRCreationError):
                 raise
@@ -182,7 +218,13 @@ class GitHubPublisher:
                 ) from exc
             raise PRCreationError(f"Failed to create PR: {exc}") from exc
 
-    async def _fork_if_needed(self, username: str, repo: Repository) -> Repository:
+    async def _fork_if_needed(
+        self,
+        username: str,
+        repo: Repository,
+        permit: PublishPermit,
+        candidate: PublishCandidate,
+    ) -> Repository:
         try:
             existing = await self._github.get_repo_details(username, repo.name)
             if existing.owner == username:
@@ -190,7 +232,12 @@ class GitHubPublisher:
                 return existing
         except Exception:
             pass
-        return await self._github.fork_repository(repo.owner, repo.name)
+        self._validate_write(permit, candidate, Capability.GITHUB_PUSH)
+        return await self._github.fork_repository(
+            repo.owner,
+            repo.name,
+            authority=self.__write_authority,
+        )
 
     @staticmethod
     def _requires_linked_issue(candidate: PublishCandidate) -> bool:
@@ -212,6 +259,8 @@ class GitHubPublisher:
 
     async def _create_issue_for_finding(
         self,
+        permit: PublishPermit,
+        candidate: PublishCandidate,
         contribution: Contribution,
         target_repo: Repository,
     ) -> int | None:
@@ -257,21 +306,29 @@ class GitHubPublisher:
 
         try:
             try:
+                self._validate_write(permit, candidate, Capability.GITHUB_CREATE_ISSUE)
                 data = await self._github.create_issue(
                     target_repo.owner,
                     target_repo.name,
                     title=issue_title,
                     body=issue_body,
+                    authority=self.__write_authority,
                     labels=[label_by_type.get(finding.type, "bug")],
                 )
+            except (PublishPermitError, PublishPolicyError):
+                raise
             except Exception:
+                self._validate_write(permit, candidate, Capability.GITHUB_CREATE_ISSUE)
                 data = await self._github.create_issue(
                     target_repo.owner,
                     target_repo.name,
                     title=issue_title,
                     body=issue_body,
+                    authority=self.__write_authority,
                 )
             return data["number"]
+        except (PublishPermitError, PublishPolicyError):
+            raise
         except Exception as exc:
             logger.warning("Failed to create issue: %s", exc)
             return None

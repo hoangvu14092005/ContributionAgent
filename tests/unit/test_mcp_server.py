@@ -442,3 +442,27 @@ class TestCleanupForks:
         data = _text(result)
         assert "me/old-fork" in data["forks_to_delete"]
         gh.delete_repository.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_dry_run_returns_explicit_blocked_error_without_deleting(self):
+        from contribai.mcp_server import _cleanup_forks
+
+        fork_data = {"full_name": "me/old-fork"}
+        all_prs = [{"fork": "me/old-fork", "status": "merged", "repo": "upstream/repo"}]
+        with patch("contribai.mcp_server.get_github") as mock_get_gh:
+            gh = AsyncMock()
+            gh.list_user_forks = AsyncMock(return_value=[fork_data])
+            gh.delete_repository = AsyncMock()
+            mock_get_gh.return_value = gh
+            with patch("contribai.mcp_server.get_memory") as mock_get_mem:
+                mem = AsyncMock()
+                mem.get_prs = AsyncMock(return_value=all_prs)
+                mock_get_mem.return_value = mem
+
+                result = await _cleanup_forks({"dry_run": False})
+
+        data = _text(result)
+        assert data["status"] == "blocked"
+        assert "permit-bearing publisher command" in data["error"]
+        assert data["forks_to_delete"] == ["me/old-fork"]
+        gh.delete_repository.assert_not_awaited()

@@ -8,13 +8,25 @@ import pytest
 import respx
 
 from contribai.core.exceptions import GitHubAPIError
-from contribai.github.client import GitHubClient
+from contribai.github.client import (
+    GitHubClient,
+    GitHubWriteAuthority,
+    GitHubWriteAuthorityError,
+    _issue_github_write_authority,
+)
+from contribai.publishing.github_publisher import GitHubPublisher
+from contribai.publishing.policy import PolicyEngine
 
 
 @pytest.fixture
 def client():
     c = GitHubClient(token="ghp_test_token")
     yield c
+
+
+def publisher_authority(client: GitHubClient) -> GitHubWriteAuthority:
+    publisher = GitHubPublisher(client, PolicyEngine())
+    return publisher._GitHubPublisher__write_authority
 
 
 class TestParseRepo:
@@ -170,17 +182,42 @@ class TestListUserForks:
 class TestDeleteRepository:
     @pytest.mark.asyncio
     async def test_delete_success(self, client):
+        authority = publisher_authority(client)
         with respx.mock:
             respx.delete("https://api.github.com/repos/me/forked-repo").mock(
                 return_value=httpx.Response(204)
             )
-            await client.delete_repository("me", "forked-repo")  # Should not raise
+            await client.delete_repository(
+                "me", "forked-repo", authority=authority
+            )  # Should not raise
 
     @pytest.mark.asyncio
     async def test_delete_raises_on_error(self, client):
+        authority = publisher_authority(client)
         with respx.mock:
             respx.delete("https://api.github.com/repos/me/missing").mock(
                 return_value=httpx.Response(404, json={"message": "Not Found"})
             )
             with pytest.raises(GitHubAPIError):
-                await client.delete_repository("me", "missing")
+                await client.delete_repository("me", "missing", authority=authority)
+
+    @pytest.mark.asyncio
+    async def test_delete_requires_publisher_authority(self, client):
+        with pytest.raises(TypeError, match="authority"):
+            await client.delete_repository("me", "forked-repo")
+
+
+class TestWriteAuthority:
+    def test_non_publisher_cannot_obtain_authority(self, client):
+        with pytest.raises(GitHubWriteAuthorityError, match="bound GitHubPublisher"):
+            _issue_github_write_authority(client, object())
+
+    @pytest.mark.asyncio
+    async def test_authority_is_bound_to_the_issuing_client(self, client):
+        other = GitHubClient(token="other-token")
+        authority = publisher_authority(client)
+        try:
+            with pytest.raises(GitHubWriteAuthorityError, match="publisher authority"):
+                await other._request("POST", "/forbidden", authority=authority)
+        finally:
+            await other.close()

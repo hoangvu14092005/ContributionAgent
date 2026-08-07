@@ -55,6 +55,16 @@ def _err(msg: str) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=json.dumps({"error": msg}))]
 
 
+def _blocked(msg: str, **kwargs: Any) -> list[types.TextContent]:
+    """Return an explicit blocked command outcome rather than success-shaped data."""
+    return [
+        types.TextContent(
+            type="text",
+            text=json.dumps({"status": "blocked", "error": msg, **kwargs}, default=str),
+        )
+    ]
+
+
 # ── Tool listing ───────────────────────────────────────────────────────────────
 
 
@@ -528,15 +538,19 @@ async def _cleanup_forks(args: dict) -> list[types.TextContent]:
 
     write_blocked = not dry_run and bool(forks_to_delete)
     if write_blocked:
-        logger.warning(
-            "Fork deletion requires a permit-bearing publisher command; no forks deleted"
+        message = "Fork deletion requires a permit-bearing publisher command; no forks deleted"
+        logger.warning(message)
+        return _blocked(
+            message,
+            forks_to_delete=forks_to_delete,
+            forks_kept=forks_kept,
+            dry_run=dry_run,
         )
 
     return _ok(
         forks_to_delete=forks_to_delete,
         forks_kept=forks_kept,
         dry_run=dry_run,
-        write_blocked=write_blocked,
     )
 
 

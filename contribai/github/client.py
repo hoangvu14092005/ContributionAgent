@@ -18,6 +18,52 @@ from contribai.core.models import FileNode, Issue, Repository
 logger = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
+_MUTATING_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_WRITE_AUTHORITY_PROOF = object()
+
+
+class GitHubWriteAuthorityError(PermissionError):
+    """Raised when a GitHub mutation lacks publisher-issued authority."""
+
+
+class GitHubWriteAuthority:
+    """Opaque, client-bound capability passed only by GitHubPublisher."""
+
+    __slots__ = ("_client", "_proof")
+
+    def __init__(self, proof: object = None, client: object = None) -> None:
+        if proof is not _WRITE_AUTHORITY_PROOF or client is None:
+            raise TypeError("GitHub write authority can only be issued to GitHubPublisher")
+        self._proof = proof
+        self._client = client
+
+
+def _issue_github_write_authority(
+    client: GitHubClient,
+    publisher: object,
+) -> GitHubWriteAuthority:
+    """Issue authority only to the exact GitHubPublisher bound to this client."""
+    from contribai.publishing.github_publisher import GitHubPublisher
+
+    if type(publisher) is not GitHubPublisher or publisher._github is not client:
+        raise GitHubWriteAuthorityError(
+            "GitHub write authority can only be issued to the bound GitHubPublisher"
+        )
+    return GitHubWriteAuthority(_WRITE_AUTHORITY_PROOF, client)
+
+
+def _require_github_write_authority(
+    client: GitHubClient,
+    authority: GitHubWriteAuthority | None,
+) -> None:
+    if (
+        not isinstance(authority, GitHubWriteAuthority)
+        or authority._proof is not _WRITE_AUTHORITY_PROOF
+        or authority._client is not client
+    ):
+        raise GitHubWriteAuthorityError(
+            "GitHub mutation requires GitHubPublisher publisher authority"
+        )
 
 
 class GitHubClient:
@@ -41,9 +87,20 @@ class GitHubClient:
 
     # ── Core HTTP ──────────────────────────────────────────────────────────
 
-    async def _request(self, method: str, url: str, *, _retries: int = 3, **kwargs) -> Any:
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        authority: GitHubWriteAuthority | None = None,
+        _retries: int = 3,
+        **kwargs,
+    ) -> Any:
         """Make an authenticated GitHub API request with error handling and retry."""
         import asyncio
+
+        if method.upper() in _MUTATING_HTTP_METHODS:
+            _require_github_write_authority(self, authority)
 
         last_error = None
         for attempt in range(1, _retries + 1):
@@ -94,7 +151,13 @@ class GitHubClient:
         raise last_error  # should never reach here
 
     async def _request_raw(
-        self, method: str, url: str, *, _retries: int = 3, **kwargs
+        self,
+        method: str,
+        url: str,
+        *,
+        authority: GitHubWriteAuthority | None = None,
+        _retries: int = 3,
+        **kwargs,
     ) -> httpx.Response:
         """Like _request() but returns the raw httpx.Response instead of parsed JSON.
 
@@ -103,6 +166,9 @@ class GitHubClient:
         reliability guarantees.
         """
         import asyncio
+
+        if method.upper() in _MUTATING_HTTP_METHODS:
+            _require_github_write_authority(self, authority)
 
         last_error = None
         for attempt in range(1, _retries + 1):
@@ -154,14 +220,32 @@ class GitHubClient:
     async def _get(self, url: str, **kwargs) -> Any:
         return await self._request("GET", url, **kwargs)
 
-    async def _post(self, url: str, **kwargs) -> Any:
-        return await self._request("POST", url, **kwargs)
+    async def _post(
+        self,
+        url: str,
+        *,
+        authority: GitHubWriteAuthority,
+        **kwargs,
+    ) -> Any:
+        return await self._request("POST", url, authority=authority, **kwargs)
 
-    async def _put(self, url: str, **kwargs) -> Any:
-        return await self._request("PUT", url, **kwargs)
+    async def _put(
+        self,
+        url: str,
+        *,
+        authority: GitHubWriteAuthority,
+        **kwargs,
+    ) -> Any:
+        return await self._request("PUT", url, authority=authority, **kwargs)
 
-    async def _delete(self, url: str, **kwargs) -> Any:
-        return await self._request("DELETE", url, **kwargs)
+    async def _delete(
+        self,
+        url: str,
+        *,
+        authority: GitHubWriteAuthority,
+        **kwargs,
+    ) -> Any:
+        return await self._request("DELETE", url, authority=authority, **kwargs)
 
     # ── Rate Limit ─────────────────────────────────────────────────────────
 
@@ -288,9 +372,18 @@ class GitHubClient:
 
     # ── Fork & Branch ──────────────────────────────────────────────────────
 
-    async def fork_repository(self, owner: str, repo: str) -> Repository:
+    async def fork_repository(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        authority: GitHubWriteAuthority,
+    ) -> Repository:
         """Fork a repository to the authenticated user's account."""
-        data = await self._post(f"/repos/{owner}/{repo}/forks")
+        data = await self._post(
+            f"/repos/{owner}/{repo}/forks",
+            authority=authority,
+        )
         logger.info("Forked %s/%s → %s", owner, repo, data["full_name"])
         return self._parse_repo(data)
 
@@ -301,10 +394,12 @@ class GitHubClient:
         branch_name: str,
         *,
         base_sha: str,
+        authority: GitHubWriteAuthority,
     ) -> dict:
         """Create a branch at the exact publisher-authorized base SHA."""
         data = await self._post(
             f"/repos/{owner}/{repo}/git/refs",
+            authority=authority,
             json={"ref": f"refs/heads/{branch_name}", "sha": base_sha},
         )
         logger.info("Created branch %s on %s/%s", branch_name, owner, repo)
@@ -320,6 +415,8 @@ class GitHubClient:
         content: str,
         message: str,
         branch: str,
+        *,
+        authority: GitHubWriteAuthority,
         sha: str | None = None,
         signoff: str | None = None,
     ) -> dict:
@@ -343,7 +440,11 @@ class GitHubClient:
         if sha:
             payload["sha"] = sha
 
-        return await self._put(f"/repos/{owner}/{repo}/contents/{path}", json=payload)
+        return await self._put(
+            f"/repos/{owner}/{repo}/contents/{path}",
+            authority=authority,
+            json=payload,
+        )
 
     async def create_pull_request(
         self,
@@ -352,6 +453,8 @@ class GitHubClient:
         title: str,
         body: str,
         head: str,
+        *,
+        authority: GitHubWriteAuthority,
         base: str | None = None,
     ) -> dict:
         """Create a pull request."""
@@ -361,6 +464,7 @@ class GitHubClient:
 
         data = await self._post(
             f"/repos/{owner}/{repo}/pulls",
+            authority=authority,
             json={"title": title, "body": body, "head": head, "base": base},
         )
         logger.info("Created PR #%d on %s/%s: %s", data["number"], owner, repo, title)
@@ -372,6 +476,7 @@ class GitHubClient:
         repo: str,
         pr_number: int,
         *,
+        authority: GitHubWriteAuthority,
         title: str | None = None,
         body: str | None = None,
     ) -> dict:
@@ -382,7 +487,10 @@ class GitHubClient:
         if body is not None:
             payload["body"] = body
         data = await self._request(
-            "PATCH", f"/repos/{owner}/{repo}/pulls/{pr_number}", json=payload
+            "PATCH",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}",
+            authority=authority,
+            json=payload,
         )
         logger.info("Updated PR #%d on %s/%s", pr_number, owner, repo)
         return data
@@ -393,13 +501,19 @@ class GitHubClient:
         repo: str,
         title: str,
         body: str,
+        *,
+        authority: GitHubWriteAuthority,
         labels: list[str] | None = None,
     ) -> dict:
         """Create an issue on a repository."""
         payload: dict[str, Any] = {"title": title, "body": body}
         if labels:
             payload["labels"] = labels
-        data = await self._post(f"/repos/{owner}/{repo}/issues", json=payload)
+        data = await self._post(
+            f"/repos/{owner}/{repo}/issues",
+            authority=authority,
+            json=payload,
+        )
         logger.info("Created issue #%d on %s/%s: %s", data["number"], owner, repo, title)
         return data
 
@@ -409,6 +523,7 @@ class GitHubClient:
         repo: str,
         issue_number: int,
         *,
+        authority: GitHubWriteAuthority,
         comment: str | None = None,
     ) -> None:
         """Close an issue with an optional comment.
@@ -418,11 +533,13 @@ class GitHubClient:
         if comment:
             await self._post(
                 f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
+                authority=authority,
                 json={"body": comment},
             )
         await self._request(
             "PATCH",
             f"/repos/{owner}/{repo}/issues/{issue_number}",
+            authority=authority,
             json={"state": "closed", "state_reason": "not_planned"},
         )
         logger.info("Closed issue #%d on %s/%s", issue_number, owner, repo)
@@ -431,10 +548,19 @@ class GitHubClient:
         """Get comments on a pull request (issue comments)."""
         return await self._get(f"/repos/{owner}/{repo}/issues/{pr_number}/comments")
 
-    async def create_pr_comment(self, owner: str, repo: str, pr_number: int, body: str) -> dict:
+    async def create_pr_comment(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        body: str,
+        *,
+        authority: GitHubWriteAuthority,
+    ) -> dict:
         """Post a comment on a pull request."""
         return await self._post(
             f"/repos/{owner}/{repo}/issues/{pr_number}/comments",
+            authority=authority,
             json={"body": body},
         )
 
@@ -449,11 +575,19 @@ class GitHubClient:
         return await self._get(f"/repos/{owner}/{repo}/pulls/{pr_number}/comments")
 
     async def create_pr_review_comment_reply(
-        self, owner: str, repo: str, pr_number: int, comment_id: int, body: str
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        comment_id: int,
+        body: str,
+        *,
+        authority: GitHubWriteAuthority,
     ) -> dict:
         """Reply to an inline review comment on a PR."""
         return await self._post(
             f"/repos/{owner}/{repo}/pulls/{pr_number}/comments/{comment_id}/replies",
+            authority=authority,
             json={"body": body},
         )
 
@@ -620,17 +754,20 @@ class GitHubClient:
         repo: str,
         pr_number: int,
         *,
+        authority: GitHubWriteAuthority,
         comment: str | None = None,
     ) -> None:
         """Close a PR with an optional comment explaining why."""
         if comment:
             await self._post(
                 f"/repos/{owner}/{repo}/issues/{pr_number}/comments",
+                authority=authority,
                 json={"body": comment},
             )
         await self._request(
             "PATCH",
             f"/repos/{owner}/{repo}/pulls/{pr_number}",
+            authority=authority,
             json={"state": "closed"},
         )
         logger.info("Closed PR #%d on %s/%s", pr_number, owner, repo)
@@ -639,9 +776,15 @@ class GitHubClient:
         """List all forks owned by the authenticated user."""
         return await self._get("/user/repos", params={"type": "fork", "per_page": "100"})
 
-    async def delete_repository(self, owner: str, repo: str) -> None:
+    async def delete_repository(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        authority: GitHubWriteAuthority,
+    ) -> None:
         """Delete a repository (must be owner or have admin access)."""
-        await self._delete(f"/repos/{owner}/{repo}")
+        await self._delete(f"/repos/{owner}/{repo}", authority=authority)
 
     async def get_issues(
         self,
