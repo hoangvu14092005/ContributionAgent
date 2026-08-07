@@ -7,6 +7,7 @@ import contextlib
 import inspect
 import json
 import os
+import shlex
 import signal
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
@@ -25,6 +26,10 @@ from contribai.engines.adapters.base import (
 from contribai.engines.capabilities import CapabilityProbeError, EngineCapabilities, VersionPolicy
 from contribai.engines.models import EngineRequest, EngineStatus, EngineUsage, ExecutionLease
 from contribai.execution.workspaces.base import Workspace
+from contribai.execution.workspaces.docker import DockerWorkspace
+
+_POLICY_FLAG_FRAGMENTS = ("bypass", "danger", "sandbox", "approval", "permission")
+_GATEWAY_ENV_PREFIX = "CONTRIBAI_MODEL_GATEWAY_"
 
 
 class CodexExecDriver(ExternalEngineDriver):
@@ -53,8 +58,10 @@ class CodexExecDriver(ExternalEngineDriver):
         self.extra_args = tuple(extra_args)
         self.engine_version = engine_version
         self.timeout_sec = timeout_sec
-        if any("bypass" in arg.lower() or "dangerously" in arg.lower() for arg in self.extra_args):
-            raise ValueError("Codex adapter refuses dangerous policy bypass flags")
+        for arg in self.extra_args:
+            normalized = arg.lower()
+            if any(fragment in normalized for fragment in _POLICY_FLAG_FRAGMENTS):
+                raise ValueError("Codex adapter refuses flags that can alter approval/sandbox policy")
 
     async def execute_runtime(
         self,
@@ -132,17 +139,43 @@ class CodexExecDriver(ExternalEngineDriver):
                 cwd=workspace.path,
                 env=environment,
             )
+
+        # Real CLI processes must stay inside the outer Docker security boundary.
+        # Running with cwd=workspace.path on the host would bypass WorkspaceManager.
+        if not isinstance(workspace, DockerWorkspace):
+            raise AdapterUnavailableError(
+                "Codex exec requires a DockerWorkspace for real process execution"
+            )
+        if not workspace.docker_available:
+            raise AdapterUnavailableError("Docker is unavailable for Codex exec")
+
+        docker_argv = workspace.build_docker_command(
+            image=workspace.image,
+            workspace_path=workspace.path,
+            command=shlex.join(argv),
+            policy=workspace.policy,
+            container_uid=workspace.container_uid,
+            container_gid=workspace.container_gid,
+        )
+        # Docker copies only the short-lived model-gateway lease variables into
+        # the container. Provider keys and arbitrary host variables never cross.
+        image_index = len(docker_argv) - 4
+        gateway_flags: list[str] = []
+        for key in sorted(environment):
+            if key.startswith(_GATEWAY_ENV_PREFIX):
+                gateway_flags.extend(("--env", key))
+        docker_argv[image_index:image_index] = gateway_flags
+
         try:
             return await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=workspace.path,
+                *docker_argv,
                 env=environment,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name == "posix"),
+                start_new_session=True,
             )
         except OSError as exc:
-            raise AdapterUnavailableError(f"unable to start Codex executable: {exc}") from exc
+            raise AdapterUnavailableError(f"unable to start sandboxed Codex executable: {exc}") from exc
 
     async def _consume_process(self, process: Any) -> AdapterResult:
         if hasattr(process, "stdout") and hasattr(process.stdout, "readline"):
