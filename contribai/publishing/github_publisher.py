@@ -36,7 +36,7 @@ class GitHubPublisher:
         github: GitHubClient,
         policy_engine: PolicyEngine,
         *,
-        idempotency_store: IdempotencyStore[PRResult],
+        idempotency_store: IdempotencyStore[PRResult] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._github = github
@@ -47,7 +47,11 @@ class GitHubPublisher:
         self.__write_authority = _issue_github_write_authority(github, self)
 
     async def publish(self, permit: PublishPermit, candidate: PublishCandidate) -> PRResult:
-        """Publish a candidate only after validating permit, policy, and identity."""
+        """Publish a candidate only with explicit durable idempotency ownership."""
+        if self._idempotency_store is None:
+            raise PublishPermitError(
+                "GitHubPublisher requires an explicit durable idempotency store before publishing"
+            )
         self._validate_permit(permit, candidate)
         self._authorize_publish(permit, candidate)
         key = IdempotencyKey(
