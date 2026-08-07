@@ -29,7 +29,12 @@ class CandidateHashMismatchError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ReviewDecision:
-    """A review action carrying the candidate proof used to make it."""
+    """A review action carrying the candidate proof used to make it.
+
+    Unknown actions remain representable so adapters can fail closed at the
+    decision boundary instead of turning untrusted input into a constructor
+    exception. Only the exact ``approve`` action can retain side-effect grants.
+    """
 
     APPROVE: ClassVar[str] = "approve"
     REJECT: ClassVar[str] = "reject"
@@ -42,8 +47,6 @@ class ReviewDecision:
 
     def __post_init__(self) -> None:
         action = str(self.action).strip().lower()
-        if action not in {self.APPROVE, self.REJECT, self.SKIP}:
-            raise ValueError(f"unknown review action: {action or '<empty>'}")
         object.__setattr__(self, "action", action)
         object.__setattr__(self, "reason", str(self.reason or "")[:2_000])
         object.__setattr__(
