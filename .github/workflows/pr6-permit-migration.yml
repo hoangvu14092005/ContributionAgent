@@ -74,28 +74,22 @@ jobs:
 
           storage_test = Path("tests/storage/test_work_items.py")
           tests = storage_test.read_text(encoding="utf-8")
+          tests = tests.replace(
+              "assert await cursor.fetchall() == [(1, 1)]",
+              "assert await cursor.fetchall() == [(1, 1), (2, 1)]",
+          )
           extra = '''\n\n@pytest.mark.asyncio\nasync def test_v1_database_migrates_publish_permit_proof_columns(tmp_path: Path) -> None:\n    db_path = tmp_path / "v1.db"\n    connection = await aiosqlite.connect(db_path)\n    try:\n        await connection.execute(\n            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "\n            "name TEXT NOT NULL, applied_at TEXT NOT NULL)"\n        )\n        await connection.execute(\n            """\n            CREATE TABLE publish_permits (\n                id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL,\n                review_request_id TEXT, patch_hash TEXT NOT NULL,\n                approved_side_effects_json TEXT NOT NULL DEFAULT '[]',\n                expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL\n            )\n            """\n        )\n        await connection.execute(\n            "INSERT INTO schema_migrations VALUES (1, 'contribution_control_plane', 'now')"\n        )\n        await connection.commit()\n        await migrate_work_item_schema(connection)\n        cursor = await connection.execute("PRAGMA table_info(publish_permits)")\n        columns = {row[1] for row in await cursor.fetchall()}\n        assert {"base_sha", "verification_id", "quota_reservation_id"} <= columns\n        cursor = await connection.execute(\n            "SELECT name FROM schema_migrations WHERE version = 2"\n        )\n        assert await cursor.fetchone() == ("publish_permit_proof_bindings",)\n    finally:\n        await connection.close()\n'''
           if "test_v1_database_migrates_publish_permit_proof_columns" not in tests:
-              storage_test.write_text(tests + extra, encoding="utf-8")
+              tests += extra
+          storage_test.write_text(tests, encoding="utf-8")
           PY
       - name: Validate permit migration
-        shell: bash
         run: |
-          set -o pipefail
-          {
-            pip install -e ".[dev,mcp]"
-            ruff format contribai/storage/work_items.py contribai/control/command_service.py tests/storage/test_work_items.py tests/integration/test_entrypoints_control_plane.py
-            ruff check contribai/storage/work_items.py contribai/control/command_service.py
-            pytest -q tests/storage/test_work_items.py tests/integration/test_entrypoints_control_plane.py tests/unit/test_publishing_idempotency.py
-            python -m compileall -q contribai/storage contribai/control
-          } 2>&1 | tee permit-validation.log
-      - name: Upload permit diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: permit-migration-diagnostics
-          path: permit-validation.log
-          if-no-files-found: ignore
+          pip install -e ".[dev,mcp]"
+          ruff format contribai/storage/work_items.py contribai/control/command_service.py tests/storage/test_work_items.py tests/integration/test_entrypoints_control_plane.py
+          ruff check contribai/storage/work_items.py contribai/control/command_service.py
+          pytest -q tests/storage/test_work_items.py tests/integration/test_entrypoints_control_plane.py tests/unit/test_publishing_idempotency.py
+          python -m compileall -q contribai/storage contribai/control
       - name: Commit permit migration
         shell: bash
         run: |
