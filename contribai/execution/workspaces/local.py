@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import os
 import shutil
 import signal
@@ -17,6 +16,7 @@ from contribai.execution.workspaces.base import (
     PatchCandidate,
     WorkspaceDiff,
     WorkspaceError,
+    compute_diff_hash,
 )
 
 _MAX_OUTPUT_CHARS = 64_000
@@ -291,7 +291,13 @@ class LocalWorkspace:
                 added_files=added_files,
                 deleted_files=deleted_files,
                 status="VERIFIED",
-                diff_hash=hashlib.sha256(patch.encode()).hexdigest(),
+                diff_hash=compute_diff_hash(
+                    base_sha=self._base_sha,
+                    patch=patch,
+                    changed_files=changed,
+                    added_files=added_files,
+                    deleted_files=deleted_files,
+                ),
             )
         except WorkspaceError:
             raise

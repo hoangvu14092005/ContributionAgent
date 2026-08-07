@@ -2,11 +2,36 @@
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 WorkspaceStatus = Literal["VERIFIED", "UNVERIFIED", "INCONCLUSIVE"]
+
+
+def compute_diff_hash(
+    *,
+    base_sha: str,
+    patch: str,
+    changed_files: Iterable[str],
+    added_files: Iterable[str] = (),
+    deleted_files: Iterable[str] = (),
+) -> str:
+    """Compute the canonical hash shared by workspace and patch collection."""
+    payload = "\x00".join(
+        (
+            base_sha,
+            patch,
+            *sorted(set(changed_files)),
+            "\x01",
+            *sorted(set(added_files)),
+            "\x02",
+            *sorted(set(deleted_files)),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +65,8 @@ class WorkspaceDiff:
     deleted_files: tuple[str, ...] = ()
     status: WorkspaceStatus = "VERIFIED"
     diff_hash: str = ""
+    binary_files: tuple[str, ...] = ()
+    unreadable_files: tuple[str, ...] = ()
 
     @property
     def publishable(self) -> bool:
