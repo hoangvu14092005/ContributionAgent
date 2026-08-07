@@ -1355,11 +1355,24 @@ class ContribPipeline:
             except Exception as e:
                 logger.debug("Opportunity repo profile failed for %s: %s", repo.full_name, e)
 
+        outcomes = []
+        get_outcomes = getattr(self._memory, "get_contribution_outcomes", None)
+        if get_outcomes is not None:
+            try:
+                loaded_outcomes = await get_outcomes(repo.full_name)
+                if isinstance(loaded_outcomes, list):
+                    outcomes = loaded_outcomes
+            except Exception as e:
+                logger.debug(
+                    "Opportunity outcome learning unavailable for %s: %s", repo.full_name, e
+                )
+
         candidates = self._opportunity_engine.rank(
             repo,
             issues=issues,
             profile=profile,
             max_candidates=max_candidates,
+            outcomes=outcomes,
         )
         issue_candidates = [
             candidate for candidate in candidates if candidate.source is OpportunitySource.ISSUE

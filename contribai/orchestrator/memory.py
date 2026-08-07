@@ -14,6 +14,11 @@ from pathlib import Path
 
 import aiosqlite
 
+from contribai.storage.outcomes import (
+    OUTCOME_SCHEMA,
+    ContributionOutcome,
+    OutcomeStore,
+)
 from contribai.storage.work_items import (
     WorkItemRepository,
     connection_transaction_lock,
@@ -126,6 +131,7 @@ class Memory:
         self._db_path = Path(db_path).expanduser()
         self._db: aiosqlite.Connection | None = None
         self._work_items: WorkItemRepository | None = None
+        self._outcomes: OutcomeStore | None = None
         self._transaction_lock = asyncio.Lock()
 
     async def init(self):
@@ -136,9 +142,11 @@ class Memory:
         async with self._transaction_lock:
             await self._db.execute("PRAGMA foreign_keys = ON")
             await self._db.executescript(SCHEMA)
+            await self._db.executescript(OUTCOME_SCHEMA)
             await self._db.commit()
         await migrate_work_item_schema(self._db)
         self._work_items = WorkItemRepository(self._db, self._transaction_lock)
+        self._outcomes = OutcomeStore(self._db, self._transaction_lock)
         logger.info("Memory initialized at %s", self._db_path)
 
     async def close(self):
@@ -146,6 +154,7 @@ class Memory:
             await self._db.close()
             self._db = None
             self._work_items = None
+            self._outcomes = None
 
     @property
     def connection(self) -> aiosqlite.Connection:
@@ -160,6 +169,26 @@ class Memory:
         if self._work_items is None:
             raise RuntimeError("Memory is not initialized")
         return self._work_items
+
+    @property
+    def outcomes(self) -> OutcomeStore:
+        """Return the structured contribution outcome repository."""
+        if self._outcomes is None:
+            raise RuntimeError("Memory is not initialized")
+        return self._outcomes
+
+    async def record_contribution_outcome(self, outcome: ContributionOutcome) -> int:
+        """Persist one structured outcome for learning and benchmark reporting."""
+        return await self.outcomes.record(outcome)
+
+    async def get_contribution_outcomes(
+        self,
+        repo: str | None = None,
+        *,
+        limit: int = 200,
+    ) -> list[ContributionOutcome]:
+        """Read structured outcome evidence for a repo or across repos."""
+        return await self.outcomes.list(repo, limit=limit)
 
     async def applied_schema_versions(self) -> tuple[int, ...]:
         """Return applied control-plane schema versions for diagnostics."""
