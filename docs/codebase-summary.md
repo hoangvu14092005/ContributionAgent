@@ -36,7 +36,7 @@ contribai/
 | Module | Purpose | Key Classes/Functions | LOC |
 |--------|---------|----------------------|-----|
 | **core** | Config, models, middleware, events, exceptions, utilities | `Config`, `Middleware`, `EventBus`, `Repository`, `Finding`, `Contribution` | 1,100 |
-| **llm** | Multi-provider routing, token budgeting, formatting | `LLMProvider`, `TaskRouter`, `ContextManager`, `Formatter` | 900 |
+| **llm** | Multi-provider routing (registry-based), token budgeting, formatting, fallback chains | `LLMProvider`, `LLM_PROVIDERS`, `register_provider`, `make_provider`, `TaskRouter`, `ContextManager`, `Formatter`, `FallbackChainProvider`, `CopilotProvider` | ~1,050 |
 | **github** | Async GitHub client, repo discovery, guidelines parsing | `GitHubClient`, `RepoDiscovery`, `GuidelineParser` | 550 |
 | **analysis** | Multi-strategy code analysis, skill loading | `CodeAnalyzer`, `SkillLoader`, `SecurityStrategy`, `CodeQualityStrategy` | 700 |
 | **generator** | LLM-powered fix generation, self-review, quality scoring | `ContributionGenerator`, `QualityScorer` | 300 |
@@ -44,12 +44,13 @@ contribai/
 | **pr** | PR creation, patrol monitoring, CLA/DCO handling | `PRManager`, `PRPatrol`, `CLAHandler` | 542 |
 | **issues** | Issue discovery and solving | `IssueSolver` | 339 |
 | **agents** | Sub-agent registry with parallel execution | `SubAgentRegistry`, `AnalyzerAgent`, `GeneratorAgent` | 158 |
+| **llm.agents** | Multi-agent coordinator (`AgentCoordinator` with `register`/`unregister`/`get`/`list_agents`) | `AgentCoordinator`, `AnalysisAgent`, `CodeGenAgent`, `ReviewAgent`, `DocsAgent`, `PlannerAgent` | ~360 |
 | **tools** | Tool protocol (MCP-inspired) | `Tool`, `ToolResult`, `GitHubTool`, `LLMTool` | 59 |
 | **mcp_server** | MCP stdio server (14 tools for Claude) | `MCPServer` | 180 |
 | **web** | FastAPI REST API, webhooks, dashboard | `app`, `api_routes`, `webhook_handler` | 324 |
 | **cli** | Click-based CLI, Rich TUI | `main`, `tui` | 150+ |
 | **scheduler** | APScheduler wrapper for cron automation | `Scheduler` | 100 |
-| **plugins** | Entry-point plugin system | `AnalyzerPlugin`, `GeneratorPlugin` | 161 |
+| **plugins** | Entry-point plugin system + singleton + `discover()` | `AnalyzerPlugin`, `GeneratorPlugin`, `PluginRegistry`, `get_plugin_registry`, `discover` | ~190 |
 | **templates** | YAML-based contribution templates | `TemplateRegistry` | 96 |
 | **notifications** | Slack/Discord/Telegram integrations | `Notifier` | 248 |
 | **sandbox** | Docker-based code validation | `Sandbox` | 244 |
@@ -98,6 +99,53 @@ contribai/
 ```
 
 **Dependency Flow:** core ← github/llm ← analysis/generator ← orchestrator ← cli/web
+
+---
+
+## Registry APIs (Layer B)
+
+Three pluggable registries replace hard-coded dispatch tables:
+
+### LLM provider registry (`contribai/llm/provider.py`)
+
+```python
+from contribai.llm import (
+    LLM_PROVIDERS,        # dict[str, type[LLMProvider]]
+    register_provider,    # @register_provider("name") decorator
+    make_provider,        # make_provider("name", config) -> LLMProvider
+    available_providers,  # sorted list of registered names
+)
+
+# Built-in: gemini, openai, anthropic, ollama, custom, copilot
+# `create_llm_provider()` and `_create_provider_for_slot()` both go through make_provider.
+```
+
+### Plugin registry (`contribai/plugins/__init__.py`)
+
+```python
+from contribai.plugins import (
+    discover,                # run entry-point discovery on the singleton
+    get_plugin_registry,     # singleton accessor
+    reset_plugin_registry,   # test-only: drop the cached singleton
+    AnalyzerPlugin, PluginRegistry,
+)
+
+# Pipeline init:
+#   registry = discover()
+#   analyzer = CodeAnalyzer(..., plugin_analyzers=registry.analyzers)
+```
+
+### Agent coordinator registry (`contribai/llm/agents.py`)
+
+```python
+coord = AgentCoordinator(llm_provider)         # installs the 5 defaults
+coord.register("reviewer", MyReviewerAgent())  # replace or add
+coord.unregister("reviewer")
+coord.get("reviewer")                         # BaseAgent | None
+coord.list_agents()                           # names in insertion order
+
+empty = AgentCoordinator(llm_provider, register_defaults=False)
+```
 
 ---
 

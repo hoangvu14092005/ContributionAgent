@@ -214,27 +214,101 @@ class PlannerAgent(BaseAgent):
 # ── Multi-Agent Coordinator ──────────────────────────
 
 
+#: Mapping from default-agent name to the class used to instantiate it.
+_DEFAULT_AGENT_FACTORIES: dict[str, type[BaseAgent]] = {
+    "analyzer": AnalysisAgent,
+    "codegen": CodeGenAgent,
+    "reviewer": ReviewAgent,
+    "docs": DocsAgent,
+    "planner": PlannerAgent,
+}
+
+
+def _default_agent_for(
+    name: str,
+    llm_provider,
+    router: TaskRouter,
+) -> BaseAgent:
+    """Build the canonical default agent for ``name``.
+
+    Raises ``ValueError`` for unknown names — the caller (typically
+    :class:`AgentCoordinator.__init__`) should never request an unknown
+    agent because :data:`AgentCoordinator.DEFAULT_AGENT_NAMES` is the only
+    source of names here. The explicit guard is defensive in case the
+    defaults tuple and the factory dict drift apart.
+    """
+    try:
+        cls = _DEFAULT_AGENT_FACTORIES[name]
+    except KeyError as e:
+        raise ValueError(
+            f"No default agent factory registered for {name!r}. "
+            f"Known names: {sorted(_DEFAULT_AGENT_FACTORIES)}"
+        ) from e
+    return cls(llm_provider, router)
+
+
 class AgentCoordinator:
     """Coordinates multiple specialized agents.
 
     Pipeline: Analyze → Plan → Generate → Review → Refine
     """
 
+    #: Names of the agents that ``AgentCoordinator()`` (no arguments) installs
+    #: by default. Exposed so callers / tests can register a custom subset.
+    DEFAULT_AGENT_NAMES: tuple[str, ...] = (
+        "analyzer",
+        "codegen",
+        "reviewer",
+        "docs",
+        "planner",
+    )
+
     def __init__(
         self,
         llm_provider,
         strategy: str = CostStrategy.BALANCED,
+        *,
+        register_defaults: bool = True,
     ):
         self._llm = llm_provider
         self._router = TaskRouter(strategy=strategy)
-        self._agents = {
-            "analyzer": AnalysisAgent(llm_provider, self._router),
-            "codegen": CodeGenAgent(llm_provider, self._router),
-            "reviewer": ReviewAgent(llm_provider, self._router),
-            "docs": DocsAgent(llm_provider, self._router),
-            "planner": PlannerAgent(llm_provider, self._router),
-        }
+        self._agents: dict[str, BaseAgent] = {}
         self._results: list[AgentResult] = []
+
+        if register_defaults:
+            for name in self.DEFAULT_AGENT_NAMES:
+                self.register(name, _default_agent_for(name, llm_provider, self._router))
+
+    # ── Registry API (Layer B) ──────────────────────────────────────────────
+
+    def register(self, name: str, agent: BaseAgent) -> None:
+        """Register (or replace) an agent under ``name``.
+
+        Replacing an existing entry logs a debug message — useful for
+        experiments that want to swap one agent (e.g. the reviewer) without
+        rebuilding the whole coordinator.
+        """
+        if name in self._agents and self._agents[name] is not agent:
+            logger.debug(
+                "AgentCoordinator: replacing agent %r (%s → %s)",
+                name,
+                type(self._agents[name]).__name__,
+                type(agent).__name__,
+            )
+        self._agents[name] = agent
+        logger.debug("AgentCoordinator: registered %r (%s)", name, type(agent).__name__)
+
+    def unregister(self, name: str) -> None:
+        """Remove an agent. No-op if ``name`` is not registered."""
+        self._agents.pop(name, None)
+
+    def get(self, name: str) -> BaseAgent | None:
+        """Look up an agent by name."""
+        return self._agents.get(name)
+
+    def list_agents(self) -> list[str]:
+        """Return the registered agent names in insertion order."""
+        return list(self._agents)
 
     async def run_analysis(self, code: str, language: str, file_path: str) -> AgentResult:
         """Run analysis agent on code."""

@@ -2,11 +2,26 @@
 
 Gemini is the primary/default provider. All providers implement
 the same async interface for easy swapping.
+
+Layer B (registry plumbing):
+
+- ``LLM_PROVIDERS`` is the canonical ``name → class`` registry.
+- :func:`register_provider` decorates a class to register it under a name.
+- :func:`make_provider` instantiates a provider by name from a config.
+- :func:`create_llm_provider` (kept for back-compat) is the high-level
+  factory that wires fallback / multi-model wrapping around a base provider.
+
+The factory used by the fallback chain — formerly ``_create_provider_for_slot``
+in :mod:`contribai.llm.fallback` — now goes through :func:`make_provider`,
+so any provider added via ``@register_provider`` is automatically available
+to every fallback slot.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -57,9 +72,94 @@ class LLMProvider(ABC):
         """Clean up any resources."""
 
 
+# ── Provider registry ─────────────────────────────────────────────────────────
+#
+# Built-in providers register themselves via ``@register_provider`` below. Third
+# party packages (or adapters added in later layers) can call
+# ``register_provider("name", cls)`` to extend this map without editing core.
+
+
+#: Canonical ``name → provider class`` registry. Populated by the
+#: :func:`register_provider` decorator at import time.
+LLM_PROVIDERS: dict[str, type[LLMProvider]] = {}
+
+
+def register_provider(name: str, cls: type[LLMProvider] | None = None):
+    """Register an LLM provider class under ``name``.
+
+    Usable as a decorator::
+
+        @register_provider("gemini")
+        class GeminiProvider(LLMProvider):
+            ...
+
+    Or imperatively::
+
+        register_provider("copilot", CopilotProvider)
+
+    Args:
+        name: Public name used by ``make_provider`` and ``LLMConfig.provider``.
+        cls: Provider class. When ``None``, the decorator returns a wrapping
+            function (decorator form).
+
+    Returns:
+        The class (decorator form) or ``None`` (imperative form).
+    """
+    if cls is None:
+        # Decorator form: ``@register_provider("name")`` — return a wrapper.
+        def _decorator(klass: type[LLMProvider]) -> type[LLMProvider]:
+            _add_to_registry(name, klass)
+            return klass
+
+        return _decorator
+
+    # Imperative form: ``register_provider("name", cls)``.
+    _add_to_registry(name, cls)
+    return cls
+
+
+def _add_to_registry(name: str, cls: type[LLMProvider]) -> None:
+    """Insert ``cls`` under ``name``, warning on collision."""
+    existing = LLM_PROVIDERS.get(name)
+    if existing is not None and existing is not cls:
+        logger.warning(
+            "LLM provider %r already registered as %s — overwriting with %s",
+            name,
+            existing.__name__,
+            cls.__name__,
+        )
+    LLM_PROVIDERS[name] = cls
+    logger.debug("Registered LLM provider: %r → %s", name, cls.__name__)
+
+
+def make_provider(name: str, config: LLMConfig) -> LLMProvider:
+    """Instantiate a provider by registered ``name``.
+
+    Args:
+        name: Provider name as registered via :func:`register_provider`.
+        config: ``LLMConfig`` scoped to this provider.
+
+    Raises:
+        LLMError: When ``name`` is not in the registry.
+    """
+    provider_cls = LLM_PROVIDERS.get(name)
+    if provider_cls is None:
+        available = ", ".join(sorted(LLM_PROVIDERS)) or "<none>"
+        raise LLMError(
+            f"Unknown LLM provider: {name!r}. Available: {available}"
+        )
+    return provider_cls(config)
+
+
+def available_providers() -> list[str]:
+    """Return sorted list of registered provider names."""
+    return sorted(LLM_PROVIDERS)
+
+
 # ── Gemini (primary) ──────────────────────────────────────────────────────────
 
 
+@register_provider("gemini")
 class GeminiProvider(LLMProvider):
     """Google Gemini provider - primary/default.
 
@@ -166,6 +266,7 @@ class GeminiProvider(LLMProvider):
 # ── OpenAI ─────────────────────────────────────────────────────────────────────
 
 
+@register_provider("openai")
 class OpenAIProvider(LLMProvider):
     """OpenAI provider (GPT-4o, etc.)."""
 
@@ -224,6 +325,7 @@ class OpenAIProvider(LLMProvider):
 # ── Anthropic ──────────────────────────────────────────────────────────────────
 
 
+@register_provider("anthropic")
 class AnthropicProvider(LLMProvider):
     """Anthropic provider (Claude)."""
 
@@ -276,6 +378,7 @@ class AnthropicProvider(LLMProvider):
 # ── Ollama (local) ─────────────────────────────────────────────────────────────
 
 
+@register_provider("ollama")
 class OllamaProvider(LLMProvider):
     """Ollama local model provider."""
 
@@ -332,9 +435,10 @@ class OllamaProvider(LLMProvider):
 # ── Custom (self-hosted) ──────────────────────────────────────────────────────
 
 
+@register_provider("custom")
 class CustomProvider(LLMProvider):
     """Custom self-hosted LLM provider with per-task model routing.
-    
+
     Supports OpenAI-compatible API endpoints with dynamic model selection
     based on task type (analysis, code_gen, review, validation, etc.).
     """
@@ -368,24 +472,24 @@ class CustomProvider(LLMProvider):
         """Get the appropriate model for the current task."""
         if override_model:
             return override_model
-        
+
         # Map task to model from config
         model = self._custom_models.get(self._current_task)
         if model:
             return model
-        
+
         # Check if there's a "default" key in custom_models
         default_model = self._custom_models.get("default")
         if default_model:
             return default_model
-        
+
         # Final fallback to config model
         return self.model
 
     async def complete(
-        self, 
-        prompt: str, 
-        *, 
+        self,
+        prompt: str,
+        *,
         system: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
@@ -397,8 +501,8 @@ class CustomProvider(LLMProvider):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         return await self.chat(
-            messages, 
-            temperature=temperature, 
+            messages,
+            temperature=temperature,
             max_tokens=max_tokens,
             model=model,
         )
@@ -414,7 +518,7 @@ class CustomProvider(LLMProvider):
     ) -> str:
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
-        
+
         # Get model for current task
         use_model = self._get_model_for_task(model)
 
@@ -443,6 +547,117 @@ class CustomProvider(LLMProvider):
 
     async def close(self):
         await self._client.close()
+
+
+# ── GitHub Copilot (special headers) ──────────────────────────────────────────
+
+
+def _resolve_gh_auth_token() -> str:
+    """Resolve GitHub CLI OAuth token (``gh auth token``).
+
+    Note: ``gh auth token`` respects the ``GITHUB_TOKEN`` env var and returns it
+    if set. But that token is a PAT, which is rejected by the Copilot API with
+    "Personal Access Tokens are not supported for this endpoint". To get the
+    actual OAuth token, we temporarily unset GITHUB_TOKEN before calling
+    ``gh auth token``.
+    """
+    env = os.environ.copy()
+    saved_token = env.pop("GITHUB_TOKEN", None)
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        if saved_token is not None:
+            os.environ["GITHUB_TOKEN"] = saved_token
+    return ""
+
+
+@register_provider("copilot")
+class CopilotProvider(LLMProvider):
+    """GitHub Copilot provider — OpenAI-compatible but with specific headers.
+
+    Registered under the name ``"copilot"``. Originally lived inside
+    :mod:`contribai.llm.fallback`; moved here so it can participate in the
+    global provider registry and be instantiated via :func:`make_provider`.
+
+    The ``__init__`` accepts an ``LLMConfig`` whose ``api_key`` may already
+    hold a real OAuth token — the fallback chain resolves the token via
+    :func:`_resolve_gh_auth_token` when the configured key is empty.
+    """
+
+    def __init__(self, config: LLMConfig):
+        super().__init__(config)
+        import httpx
+
+        token = config.api_key or _resolve_gh_auth_token()
+        self._client = httpx.AsyncClient(
+            base_url=config.base_url or "",
+            timeout=60.0,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Editor-Version": "vscode/1.85.0",
+                "Editor-Plugin-Version": "copilot-chat/0.12.0",
+                "User-Agent": "GithubCopilot/1.155.0",
+                "Copilot-Integration-Id": "vscode-chat",
+            },
+        )
+
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        **kwargs,
+    ) -> str:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        return await self.chat(messages, temperature=temperature, max_tokens=max_tokens)
+
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        system: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        **kwargs,
+    ) -> str:
+        temp = temperature if temperature is not None else self.temperature
+        max_tok = max_tokens if max_tokens is not None else self.max_tokens
+
+        all_messages = list(messages)
+        if system and not any(m["role"] == "system" for m in all_messages):
+            all_messages.insert(0, {"role": "system", "content": system})
+
+        payload = {
+            "model": self.model,
+            "messages": all_messages,
+            "temperature": temp,
+            "max_tokens": max_tok,
+            "stream": False,
+        }
+        response = await self._client.post("/chat/completions", json=payload)
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"] or ""
+
+    async def close(self):
+        await self._client.aclose()
 
 
 # ── Multi-Model Wrapper ────────────────────────────────────────────────────────
@@ -550,15 +765,6 @@ class MultiModelProvider(LLMProvider):
 # ── Factory ────────────────────────────────────────────────────────────────────
 
 
-_PROVIDERS: dict[str, type[LLMProvider]] = {
-    "gemini": GeminiProvider,
-    "openai": OpenAIProvider,
-    "anthropic": AnthropicProvider,
-    "ollama": OllamaProvider,
-    "custom": CustomProvider,
-}
-
-
 def create_llm_provider(
     config: LLMConfig,
     multi_model: bool = False,
@@ -572,7 +778,8 @@ def create_llm_provider(
          order on failure.
       2. If ``multi_model=True`` and provider is Gemini, wrap with
          :class:`MultiModelProvider` for per-task model routing.
-      3. Otherwise, instantiate the configured provider directly.
+      3. Otherwise, instantiate the configured provider directly via
+         :func:`make_provider`.
 
     Args:
         config: LLM configuration
@@ -594,12 +801,6 @@ def create_llm_provider(
         )
         return FallbackChainProvider(config, chains, default_chain)
 
-    provider_cls = _PROVIDERS.get(config.provider)
-    if not provider_cls:
-        raise LLMError(
-            f"Unknown LLM provider: {config.provider}. Available: {', '.join(_PROVIDERS.keys())}"
-        )
-
     if multi_model and config.provider == "gemini":
         logger.info(
             "Using multi-model routing (strategy=%s, default=%s)",
@@ -613,4 +814,21 @@ def create_llm_provider(
         config.provider,
         config.model,
     )
-    return provider_cls(config)
+    return make_provider(config.provider, config)
+
+
+__all__ = [
+    "LLMProvider",
+    "LLM_PROVIDERS",
+    "register_provider",
+    "make_provider",
+    "available_providers",
+    "GeminiProvider",
+    "OpenAIProvider",
+    "AnthropicProvider",
+    "OllamaProvider",
+    "CustomProvider",
+    "CopilotProvider",
+    "MultiModelProvider",
+    "create_llm_provider",
+]

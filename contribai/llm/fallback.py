@@ -33,14 +33,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from contribai.core.exceptions import LLMError, LLMRateLimitError
-from contribai.llm.provider import LLMProvider
+from contribai.llm.provider import (
+    LLMProvider,
+    make_provider,
+)
 
 if __name__ != "__main__":
     from contribai.core.config import LLMConfig
@@ -67,146 +68,78 @@ class ProviderSlot:
             self.name = f"{self.provider}:{self.model}"
 
 
-# ── Auth resolver ─────────────────────────────────────────────────────────────
-
-
-def _resolve_gh_auth_token() -> str:
-    """Resolve GitHub CLI OAuth token (``gh auth token``).
-
-    Note: ``gh auth token`` respects the ``GITHUB_TOKEN`` env var and returns it
-    if set. But that token is a PAT, which is rejected by the Copilot API with
-    "Personal Access Tokens are not supported for this endpoint". To get the
-    actual OAuth token, we temporarily unset GITHUB_TOKEN before calling
-    ``gh auth token``.
-    """
-    # Save and unset GITHUB_TOKEN so gh returns the real OAuth token
-    env = os.environ.copy()
-    saved_token = env.pop("GITHUB_TOKEN", None)
-    try:
-        result = subprocess.run(
-            ["gh", "auth", "token"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=env,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    finally:
-        # Restore GITHUB_TOKEN (don't pollute caller state)
-        if saved_token is not None:
-            os.environ["GITHUB_TOKEN"] = saved_token
-    return ""
-
-
 # ── Provider factory ──────────────────────────────────────────────────────────
 
 
-def _create_provider_for_slot(slot: ProviderSlot, base_config: LLMConfig):
-    """Build a real LLMProvider instance for a slot.
+# Slot provider names that are OpenAI-compatible but use the "custom" base class.
+_OPENAI_COMPATIBLE_SLOT_NAMES = frozenset({
+    "rocket-free-2",
+    "rocket-free-1",
+    "kilo",
+    "opencode",
+})
 
-    Handles provider-specific protocol differences (Copilot uses ``/chat/completions``
-    with a special token, custom endpoints use OpenAI SDK, etc.).
+# Native provider names known to the registry.
+_KNOWN_NATIVE_PROVIDERS = frozenset({
+    "openai",
+    "anthropic",
+    "ollama",
+    "gemini",
+    "custom",
+})
+
+
+def _create_provider_for_slot(slot: ProviderSlot, base_config: LLMConfig) -> LLMProvider:
+    """Build a real LLMProvider instance for a slot via the shared registry.
+
+    Translates the slot's free-form ``provider`` string (``"rocket-free-2"``,
+    ``"copilot"``, ``"openai"``…) into the appropriate registered class and
+    scopes the ``LLMConfig`` so the instantiated provider sees only its own
+    base URL, key, and model.
+
+    Routing rules (Layer B reconciliation):
+      - ``copilot`` → registered as ``"copilot"`` (Copilot-specific headers
+        applied inside :class:`contribai.llm.provider.CopilotProvider`).
+      - OpenAI-compatible aliases (``rocket-free-*``, ``kilo``, ``opencode``,
+        anything unknown) → registered as ``"custom"`` and the slot base URL
+        is written into ``custom_base_url``/``base_url``.
+      - Known native names (``openai``, ``anthropic``, ``ollama``, ``gemini``,
+        ``custom``) → registered directly.
+
+    Copilot-specific auth resolution (``gh auth token``) is owned by
+    :class:`contribai.llm.provider.CopilotProvider`; this factory just passes
+    the configured key through and lets that class fall back to ``gh`` when
+    it's empty.
     """
-    from contribai.llm.provider import (
-        CustomProvider,
-        OpenAIProvider,
-    )
-
     # Build a fresh LLMConfig scoped to this slot
     slot_config = base_config.model_copy(deep=True)
-    slot_config.provider = "custom" if slot.provider.startswith(("rocket", "custom", "copilot")) else slot.provider
-    slot_config.custom_base_url = slot.base_url
     slot_config.base_url = slot.base_url
-    slot_config.api_key = slot.api_key or "dummy-key"
+    slot_config.api_key = slot.api_key
     slot_config.model = slot.model
     slot_config.custom_models = {"default": slot.model, slot.provider: slot.model}
 
+    # ── Map slot provider name → registered provider name ───────────────────
     if slot.provider == "copilot":
-        # GitHub Copilot requires Bearer auth via gh token
-        slot_config.api_key = slot.api_key or _resolve_gh_auth_token()
-        return _CopilotProvider(slot_config, slot)
-    elif slot.provider in ("rocket-free-2", "rocket-free-1", "kilo", "opencode"):
-        return CustomProvider(slot_config)
-    elif slot.provider == "openai":
-        return OpenAIProvider(slot_config)
+        slot_config.provider = "copilot"
+    elif slot.provider in _OPENAI_COMPATIBLE_SLOT_NAMES:
+        slot_config.provider = "custom"
+        slot_config.custom_base_url = slot.base_url
+    elif slot.provider in _KNOWN_NATIVE_PROVIDERS:
+        slot_config.provider = slot.provider
+        if slot.provider == "custom":
+            slot_config.custom_base_url = slot.base_url
     else:
-        # Default: treat as CustomProvider (OpenAI-compatible)
-        return CustomProvider(slot_config)
-
-
-# ── Copilot-specific provider (header quirks) ─────────────────────────────────
-
-
-class _CopilotProvider(LLMProvider):
-    """GitHub Copilot provider — OpenAI-compatible but with specific headers."""
-
-    def __init__(self, config: LLMConfig, slot: ProviderSlot):
-        super().__init__(config)
-        import httpx
-
-        self._slot = slot
-        self._client = httpx.AsyncClient(
-            base_url=slot.base_url,
-            timeout=slot.timeout,
-            headers={
-                "Authorization": f"Bearer {slot.api_key or _resolve_gh_auth_token()}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Editor-Version": "vscode/1.85.0",
-                "Editor-Plugin-Version": "copilot-chat/0.12.0",
-                "User-Agent": "GithubCopilot/1.155.0",
-                "Copilot-Integration-Id": "vscode-chat",
-            },
+        # Unknown provider name — default to "custom" (OpenAI-compatible)
+        # rather than failing outright. The user will see a clear error
+        # at the HTTP layer if the endpoint truly isn't compatible.
+        logger.debug(
+            "Unknown slot provider %r — falling back to 'custom' (OpenAI-compatible)",
+            slot.provider,
         )
+        slot_config.provider = "custom"
+        slot_config.custom_base_url = slot.base_url
 
-    async def complete(
-        self,
-        prompt: str,
-        *,
-        system: str | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        **kwargs,
-    ) -> str:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        return await self.chat(messages, temperature=temperature, max_tokens=max_tokens)
-
-    async def chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        system: str | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        **kwargs,
-    ) -> str:
-        temp = temperature if temperature is not None else self.temperature
-        max_tok = max_tokens if max_tokens is not None else self.max_tokens
-
-        all_messages = list(messages)
-        if system and not any(m["role"] == "system" for m in all_messages):
-            all_messages.insert(0, {"role": "system", "content": system})
-
-        payload = {
-            "model": self._slot.model,
-            "messages": all_messages,
-            "temperature": temp,
-            "max_tokens": max_tok,
-            "stream": False,
-        }
-        response = await self._client.post("/chat/completions", json=payload)
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"] or ""
-
-    async def close(self):
-        await self._client.aclose()
+    return make_provider(slot_config.provider, slot_config)
 
 
 # ── Fallback chain provider ──────────────────────────────────────────────────
