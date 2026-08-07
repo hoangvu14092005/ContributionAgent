@@ -61,7 +61,9 @@ class CodexExecDriver(ExternalEngineDriver):
         for arg in self.extra_args:
             normalized = arg.lower()
             if any(fragment in normalized for fragment in _POLICY_FLAG_FRAGMENTS):
-                raise ValueError("Codex adapter refuses flags that can alter approval/sandbox policy")
+                raise ValueError(
+                    "Codex adapter refuses bypass flags that alter approval/sandbox policy"
+                )
 
     async def execute_runtime(
         self,
@@ -175,7 +177,9 @@ class CodexExecDriver(ExternalEngineDriver):
                 start_new_session=True,
             )
         except OSError as exc:
-            raise AdapterUnavailableError(f"unable to start sandboxed Codex executable: {exc}") from exc
+            raise AdapterUnavailableError(
+                f"unable to start sandboxed Codex executable: {exc}"
+            ) from exc
 
     async def _consume_process(self, process: Any) -> AdapterResult:
         if hasattr(process, "stdout") and hasattr(process.stdout, "readline"):
