@@ -1,5 +1,14 @@
 """Coding-engine contracts owned by the Contribution control plane."""
 
+from contribai.engines.adapters import (
+    AdapterResult,
+    AdapterUnavailableError,
+    CodexAppServerDriver,
+    CodexExecDriver,
+    MiniSWEInProcessDriver,
+    OpenCodeServerDriver,
+    OpenHandsSDKDriver,
+)
 from contribai.engines.candidates import CandidateSet, PatchCandidate
 from contribai.engines.capabilities import CapabilityProbeError, EngineCapabilities, VersionPolicy
 from contribai.engines.leases import LeaseExpiredError, create_execution_lease
@@ -22,9 +31,13 @@ from contribai.engines.router import (
 )
 
 __all__ = [
+    "AdapterResult",
+    "AdapterUnavailableError",
     "BinaryEngineProbe",
     "CandidateSet",
     "CapabilityProbeError",
+    "CodexAppServerDriver",
+    "CodexExecDriver",
     "EngineCapabilities",
     "EngineDriver",
     "EngineOutcome",
@@ -36,8 +49,11 @@ __all__ = [
     "EngineUsage",
     "ExecutionLease",
     "LeaseExpiredError",
+    "MiniSWEInProcessDriver",
     "NativeEngineDriver",
     "NativeExecutionResult",
+    "OpenCodeServerDriver",
+    "OpenHandsSDKDriver",
     "PatchCandidate",
     "RepairTask",
     "RoutingMode",

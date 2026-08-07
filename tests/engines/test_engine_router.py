@@ -94,3 +94,12 @@ def test_router_denies_live_unsupported_and_no_match() -> None:
 
     with pytest.raises(EngineRoutingError):
         router.route(mode=RoutingMode.LIVE)
+
+
+def test_optional_registration_does_not_change_default_live_path() -> None:
+    router = EngineRouter()
+    registration = router.register_optional("codex", StubDriver())
+
+    assert registration.live_supported is False
+    with pytest.raises(EngineRoutingError):
+        router.route(mode=RoutingMode.LIVE)

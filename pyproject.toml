@@ -53,6 +53,12 @@ local-llm = [
 mcp = [
     "mcp>=1.0,<2.0",
 ]
+engine-mini-swe = [
+    "mini-swe-agent>=1.0,<2.0",
+]
+engine-openhands = [
+    "openhands-sdk>=0.1,<1.0",
+]
 
 [project.scripts]
 contribai = "contribai.cli.main:cli"

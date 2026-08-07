@@ -127,6 +127,22 @@ class EngineRouter:
         self._registrations[name] = registration
         return registration
 
+    def register_optional(
+        self,
+        name: str,
+        driver: EngineDriver,
+        **kwargs: object,
+    ) -> EngineRegistration:
+        """Register an external driver without changing the default live path.
+
+        Optional adapters are shadow/review-only until a caller supplies a
+        pinned capability snapshot and explicitly opts them into live mode.
+        This keeps installing an SDK or binary from silently replacing the
+        NativeEngineDriver.
+        """
+        kwargs.setdefault("live_supported", False)
+        return self.register(name, driver, **kwargs)
+
     def route(
         self,
         request: EngineRoutingRequest | None = None,

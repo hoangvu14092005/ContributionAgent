@@ -88,6 +88,7 @@ class ExecutionLease:
     credential_lease: CredentialLease | None = field(default=None, repr=False)
     expires_at: datetime | None = None
     workspace: Workspace | None = field(default=None, repr=False, compare=False)
+    model_gateway: object | None = field(default=None, repr=False, compare=False)
     cancel_event: asyncio.Event | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -116,6 +117,24 @@ class ExecutionLease:
     def cancelled(self) -> bool:
         """Return the cooperative cancellation flag, when one is supplied."""
         return self.cancel_event.is_set() if self.cancel_event else False
+
+    def scoped_model_environment(self) -> dict[str, str]:
+        """Return only short-lived gateway handles safe for an engine process.
+
+        The returned token is a lease token, never an upstream provider key.  A
+        driver must pass this mapping through ``ResourcePolicy`` with the
+        scoped-credential allow-list enabled; arbitrary credential environment
+        variables remain rejected.
+        """
+        lease = self.credential_lease
+        if lease is None:
+            return {}
+        return {
+            "CONTRIBAI_MODEL_GATEWAY_URL": lease.endpoint,
+            "CONTRIBAI_MODEL_GATEWAY_PROVIDER": lease.provider,
+            "CONTRIBAI_MODEL_GATEWAY_TOKEN": lease.token,
+            "CONTRIBAI_MODEL_GATEWAY_LEASE_ID": lease.lease_id,
+        }
 
 
 @dataclass(frozen=True, slots=True)

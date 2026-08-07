@@ -26,6 +26,14 @@ _SECRET_ENV_NAMES = frozenset(
         "AWS_SESSION_TOKEN",
     }
 )
+_SCOPED_MODEL_ENV_NAMES = frozenset(
+    {
+        "CONTRIBAI_MODEL_GATEWAY_URL",
+        "CONTRIBAI_MODEL_GATEWAY_PROVIDER",
+        "CONTRIBAI_MODEL_GATEWAY_TOKEN",
+        "CONTRIBAI_MODEL_GATEWAY_LEASE_ID",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +65,18 @@ class ResourcePolicy:
         """Return the non-interactive Docker network mode."""
         return "bridge" if self.network == "allow" else "none"
 
-    def sanitized_environment(self, extra: dict[str, str] | None = None) -> dict[str, str]:
-        """Return an environment without host credentials or socket handles."""
+    def sanitized_environment(
+        self,
+        extra: dict[str, str] | None = None,
+        *,
+        allow_scoped_model_credentials: bool = False,
+    ) -> dict[str, str]:
+        """Return an environment without host credentials or socket handles.
+
+        ``allow_scoped_model_credentials`` permits only the exact
+        ``CONTRIBAI_MODEL_GATEWAY_*`` names issued by an execution lease.  It
+        never permits provider API keys or arbitrary ``*_TOKEN`` variables.
+        """
         environment = {
             key: value
             for key, value in os.environ.items()
@@ -68,7 +86,12 @@ class ResourcePolicy:
         }
         if extra:
             for key, value in extra.items():
-                if key in _SECRET_ENV_NAMES or key.endswith("_API_KEY"):
+                scoped = key in _SCOPED_MODEL_ENV_NAMES
+                if (
+                    key in _SECRET_ENV_NAMES
+                    or key.endswith("_API_KEY")
+                    or (scoped and not allow_scoped_model_credentials)
+                ):
                     raise ValueError(f"raw credential environment is not allowed: {key}")
                 environment[key] = value
         return environment

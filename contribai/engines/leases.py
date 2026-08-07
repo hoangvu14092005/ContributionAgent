@@ -22,6 +22,7 @@ def create_execution_lease(
     budget: ExecutionBudget,
     workspace: Workspace | None = None,
     credential_lease: CredentialLease | None = None,
+    model_gateway: object | None = None,
     ttl_sec: float | None = None,
 ) -> ExecutionLease:
     """Create a lease with an optional wall-clock expiry."""
@@ -34,6 +35,7 @@ def create_execution_lease(
         workspace_ref=workspace_ref,
         budget=budget,
         credential_lease=credential_lease,
+        model_gateway=model_gateway,
         expires_at=expires_at,
         workspace=workspace,
     )
