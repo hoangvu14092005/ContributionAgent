@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,6 +13,7 @@ from contribai.control.command_service import CommandService, CommandStateError
 from contribai.control.mode import ExecutionMode
 from contribai.core.config import ContribAIConfig, GitHubConfig, LLMConfig, StorageConfig
 from contribai.domain.state import WorkState
+from contribai.publishing.permit import PublishSideEffect
 from contribai.review.models import ReviewStatus
 from contribai.scheduler.scheduler import ContribScheduler
 
@@ -68,6 +70,48 @@ async def test_resume_and_reject_follow_fail_closed_state_edges(memory) -> None:
     assert rejected.state is WorkState.DISCOVERED
     resumed = await commands.resume(item.id)
     assert resumed.state is WorkState.DISCOVERED
+
+
+@pytest.mark.asyncio
+async def test_approved_review_can_issue_one_persistent_publish_permit(memory) -> None:
+    commands = CommandService(memory)
+    item = await commands.submit("owner/repo", issue_number=12)
+    for target in (
+        WorkState.QUALIFIED,
+        WorkState.RESERVED,
+        WorkState.PREPARING,
+        WorkState.SOLVING,
+        WorkState.PATCH_COLLECTING,
+        WorkState.PATCHED,
+        WorkState.VERIFYING,
+        WorkState.VERIFIED,
+    ):
+        item = await memory.work_items.transition(
+            item.id,
+            target,
+            expected_version=item.version,
+        )
+
+    request = await commands.request_review(
+        item.id,
+        "patch-12",
+        required_side_effects=(PublishSideEffect.CREATE_PR,),
+    )
+    item = await commands.approve(request.id, "patch-12")
+    permit = await commands.issue_publish_permit(
+        item.id,
+        request.id,
+        base_sha="base-12",
+        patch_sha256="patch-12",
+        verification_id="verification-12",
+        quota_reservation_id="quota-12",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+
+    assert permit.review_id == request.id
+    assert permit.approved_side_effects == frozenset({PublishSideEffect.CREATE_PR})
+    cursor = await memory.connection.execute("SELECT COUNT(*) FROM publish_permits")
+    assert (await cursor.fetchone())[0] == 1
 
 
 @pytest.mark.asyncio

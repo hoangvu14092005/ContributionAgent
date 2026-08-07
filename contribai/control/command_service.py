@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import cast
 from urllib.parse import urlparse
 
@@ -12,11 +14,13 @@ from contribai.control.mode import ExecutionMode
 from contribai.domain.state import WorkState, allowed_transitions
 from contribai.domain.work_item import BudgetSnapshot, JsonValue, WorkItem
 from contribai.orchestrator.memory import Memory
+from contribai.publishing.permit import PublishPermit, PublishSideEffect
 from contribai.review.models import ReviewDecision, ReviewRequest
 from contribai.review.service import ReviewService
 from contribai.storage.work_items import (
     DuplicateWorkItemError,
     WorkItemNotFoundError,
+    connection_transaction_lock,
 )
 
 
@@ -147,6 +151,76 @@ class CommandService:
         )
         return await self._apply_review_result(request, "rejected", WorkState.NEEDS_FIX)
 
+    async def issue_publish_permit(
+        self,
+        work_id: str,
+        review_id: str,
+        *,
+        base_sha: str,
+        patch_sha256: str,
+        verification_id: str,
+        quota_reservation_id: str,
+        expires_at: datetime,
+        approved_side_effects: frozenset[PublishSideEffect] | None = None,
+    ) -> PublishPermit:
+        """Issue a durable permit only after state, review and proof bindings match."""
+        item = await self.get(work_id)
+        if item.state is not WorkState.APPROVED:
+            raise CommandStateError("PublishPermit requires an approved WorkItem")
+        review = await self._reviews.get(review_id)
+        if review.work_id != work_id or review.decision is None or not review.decision.approved:
+            raise CommandStateError("PublishPermit requires an approved matching review")
+        if review.candidate_hash != patch_sha256:
+            raise CommandStateError("PublishPermit patch hash does not match review proof")
+        if not all(
+            value.strip()
+            for value in (base_sha, patch_sha256, verification_id, quota_reservation_id)
+        ):
+            raise ValueError("PublishPermit proof bindings must not be empty")
+        expiry = _aware(expires_at)
+        if expiry <= datetime.now(UTC):
+            raise ValueError("PublishPermit expiry must be in the future")
+        effects = frozenset(
+            approved_side_effects
+            if approved_side_effects is not None
+            else review.decision.approved_side_effects
+        )
+        if PublishSideEffect.CREATE_PR not in effects:
+            raise CommandStateError("PublishPermit requires reviewed create_pr side effect")
+
+        permit_id = _permit_id(work_id, review_id, patch_sha256, verification_id)
+        lock = connection_transaction_lock(self._memory.connection)
+        async with lock:
+            await self._memory.connection.execute(
+                """
+                INSERT OR IGNORE INTO publish_permits
+                    (id, work_item_id, review_request_id, patch_hash,
+                     approved_side_effects_json, expires_at, consumed_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (
+                    permit_id,
+                    work_id,
+                    review_id,
+                    patch_sha256,
+                    json.dumps(sorted(effect.value for effect in effects)),
+                    expiry.isoformat(),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            await self._memory.connection.commit()
+        return PublishPermit(
+            work_id=work_id,
+            repo=item.repo,
+            base_sha=base_sha,
+            patch_sha256=patch_sha256,
+            verification_id=verification_id,
+            review_id=review_id,
+            approved_side_effects=effects,
+            quota_reservation_id=quota_reservation_id,
+            expires_at=expiry,
+        )
+
     async def resume(self, work_id: str) -> WorkItem:
         """Resume a repairable WorkItem through its explicit retry transition."""
         item = await self.get(work_id)
@@ -222,6 +296,17 @@ def _work_id(repo: str, issue_number: int | None, idempotency_key: str | None) -
     identity = idempotency_key or f"{repo}#{issue_number or ''}:{uuid.uuid4().hex}"
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
     return f"work-{digest}"
+
+
+def _permit_id(work_id: str, review_id: str, patch_sha256: str, verification_id: str) -> str:
+    identity = "\x00".join((work_id, review_id, patch_sha256, verification_id))
+    return f"permit-{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 __all__ = ["CommandService", "CommandStateError"]
