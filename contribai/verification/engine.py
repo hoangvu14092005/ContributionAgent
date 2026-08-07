@@ -22,7 +22,7 @@ from contribai.verification.runners import VerificationRunner, WorkspaceVerifica
 class VerificationPlan:
     """Commands run in order after baseline preservation."""
 
-    baseline_command: str = "git diff --quiet"
+    baseline_command: str = 'test -z "$(git status --porcelain --untracked-files=all)"'
     syntax_command: str | None = None
     tests_command: str | None = None
     lint_command: str | None = None
@@ -204,7 +204,12 @@ def _passed(evidence: list[VerificationEvidence], name: str) -> bool:
 
 
 def _default_syntax_command(candidate: PatchCandidate) -> str | None:
-    python_files = [path for path in candidate.changed_files if Path(path).suffix == ".py"]
+    deleted = set(candidate.deleted_files)
+    python_files = [
+        path
+        for path in candidate.changed_files
+        if path not in deleted and Path(path).suffix == ".py"
+    ]
     if python_files:
         return "python -m py_compile " + " ".join(shlex.quote(path) for path in python_files)
     return None
