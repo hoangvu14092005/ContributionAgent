@@ -707,6 +707,15 @@ async def test_restart_recovery_preserves_publish_reserved_for_reconciliation(
     second_memory = Memory(path)
     await second_memory.init()
     try:
+        with pytest.raises(InvalidWorkTransitionError):
+            await second_memory.work_items.transition(
+                item.id,
+                WorkState.CLOSED,
+                expected_version=item.version,
+                reason="generic close is not reconciliation",
+            )
+        assert await second_memory.work_items.get(item.id) == item
+
         assert await second_memory.work_items.recover_interrupted(reason="restart") == []
         assert await second_memory.work_items.recover_interrupted(reason="restart again") == []
         loaded = await second_memory.work_items.get(item.id)
