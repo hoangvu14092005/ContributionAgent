@@ -36,7 +36,7 @@ class ModelGateway:
         self._provider_factory = provider_factory
 
     async def complete_request(self, request: LLMRequest, lease: CredentialLease) -> str:
-        if request.credential_scope and request.credential_scope != lease.lease_id:
+        if request.credential_scope != lease.lease_id:
             raise CredentialDeniedError("request credential scope does not match the lease")
         if request.provider not in self._configs:
             raise ModelGatewayError(f"no control-plane config for provider: {request.provider}")
