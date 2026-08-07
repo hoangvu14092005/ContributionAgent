@@ -16,15 +16,51 @@ from contribai.domain.state import WorkState
 from contribai.publishing.permit import PublishSideEffect
 from contribai.review.models import ReviewStatus
 from contribai.scheduler.scheduler import ContribScheduler
+from contribai.verification.models import (
+    VerificationEvidence,
+    VerificationReport,
+    VerificationStatus,
+)
+
+
+async def _advance(memory, item, *targets):
+    for target in targets:
+        item = await memory.work_items.transition(
+            item.id,
+            target,
+            expected_version=item.version,
+        )
+    return item
+
+
+def _passing_report(candidate_hash: str) -> VerificationReport:
+    return VerificationReport(
+        status=VerificationStatus.PASSED,
+        baseline_passed=True,
+        syntax_passed=True,
+        tests_passed=True,
+        lint_passed=True,
+        typecheck_passed=True,
+        security_passed=True,
+        quality_score=1.0,
+        tests_run=1,
+        tests_failed=0,
+        evidence=(
+            VerificationEvidence("baseline", True, "VERIFIED", command="git status --porcelain"),
+            VerificationEvidence("tests", True, "VERIFIED", command="pytest -q"),
+        ),
+        candidate_hash=candidate_hash,
+    )
 
 
 @pytest.mark.asyncio
-async def test_commands_share_persistent_work_item_and_review_lifecycle(memory) -> None:
+async def test_commands_share_persistent_work_item_lifecycle(memory) -> None:
     commands = CommandService(memory)
     item = await commands.submit(
         "https://github.com/owner/repo",
         issue_number=7,
         mode=ExecutionMode.SHADOW,
+        budget={"max_steps": 3},
         idempotency_key="entrypoint-7",
         metadata={"source": "webhook"},
     )
@@ -32,51 +68,41 @@ async def test_commands_share_persistent_work_item_and_review_lifecycle(memory) 
         "owner/repo",
         issue_number=7,
         mode=ExecutionMode.SHADOW,
+        budget={"max_steps": 3},
         idempotency_key="entrypoint-7",
     )
     assert duplicate.id == item.id
+
     with pytest.raises(CommandStateError):
         await commands.submit(
             "owner/repo",
             issue_number=8,
             mode=ExecutionMode.SHADOW,
+            budget={"max_steps": 3},
             idempotency_key="entrypoint-7",
         )
-
-    request = await commands.request_review(item.id, "candidate-1")
-    assert request.status is ReviewStatus.PENDING
-    approved = await commands.approve(request.id, "candidate-1")
-    assert approved.state is WorkState.DISCOVERED
+    with pytest.raises(CommandStateError):
+        await commands.submit(
+            "owner/repo",
+            issue_number=7,
+            mode=ExecutionMode.SHADOW,
+            budget={"max_steps": 999},
+            idempotency_key="entrypoint-7",
+        )
+    with pytest.raises(CommandStateError, match="verified"):
+        await commands.request_review(item.id, "candidate-1")
 
     cancelled = await commands.cancel(item.id)
     assert cancelled.state is WorkState.CLOSED
-    events = await memory.work_items.list_events(item.id)
-    assert [event.event_type for event in events] == [
-        "created",
-        "command_submitted",
-        "review_requested",
-        "review_approved",
-        "transition",
-    ]
 
 
 @pytest.mark.asyncio
-async def test_resume_and_reject_follow_fail_closed_state_edges(memory) -> None:
+async def test_review_requires_current_verified_attempt(memory) -> None:
     commands = CommandService(memory)
     item = await commands.submit("owner/repo", issue_number=8)
-    request = await commands.request_review(item.id, "candidate-2")
-    rejected = await commands.reject(request.id, "candidate-2", reason="needs work")
-
-    assert rejected.state is WorkState.DISCOVERED
-    resumed = await commands.resume(item.id)
-    assert resumed.state is WorkState.DISCOVERED
-
-
-@pytest.mark.asyncio
-async def test_approved_review_can_issue_one_persistent_publish_permit(memory) -> None:
-    commands = CommandService(memory)
-    item = await commands.submit("owner/repo", issue_number=12)
-    for target in (
+    item = await _advance(
+        memory,
+        item,
         WorkState.QUALIFIED,
         WorkState.RESERVED,
         WorkState.PREPARING,
@@ -84,34 +110,155 @@ async def test_approved_review_can_issue_one_persistent_publish_permit(memory) -
         WorkState.PATCH_COLLECTING,
         WorkState.PATCHED,
         WorkState.VERIFYING,
-        WorkState.VERIFIED,
-    ):
-        item = await memory.work_items.transition(
-            item.id,
-            target,
-            expected_version=item.version,
-        )
+    )
+    item, _ = await commands.record_verification(item.id, _passing_report("candidate-2"))
+    request = await commands.request_review(item.id, "candidate-2")
+    assert request.status is ReviewStatus.PENDING
+    rejected = await commands.reject(request.id, "candidate-2", reason="needs work")
+    assert rejected.state is WorkState.NEEDS_FIX
+    resumed = await commands.resume(item.id)
+    assert resumed.state is WorkState.PREPARING
+    assert resumed.attempt == 2
 
+
+@pytest.mark.asyncio
+async def test_live_approved_review_issues_proof_bound_publish_permit(memory) -> None:
+    commands = CommandService(memory)
+    item = await commands.submit(
+        "owner/repo",
+        issue_number=12,
+        mode=ExecutionMode.LIVE,
+    )
+    item = await _advance(
+        memory,
+        item,
+        WorkState.QUALIFIED,
+        WorkState.RESERVED,
+        WorkState.PREPARING,
+        WorkState.SOLVING,
+        WorkState.PATCH_COLLECTING,
+        WorkState.PATCHED,
+        WorkState.VERIFYING,
+    )
+    item, verification_id = await commands.record_verification(
+        item.id,
+        _passing_report("patch-12"),
+    )
     request = await commands.request_review(
         item.id,
         "patch-12",
         required_side_effects=(PublishSideEffect.CREATE_PR,),
     )
     item = await commands.approve(request.id, "patch-12")
+    quota_id = await commands.reserve_publish_quota(
+        item.id,
+        provider="github",
+        amount={"pull_requests": 1},
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
     permit = await commands.issue_publish_permit(
         item.id,
         request.id,
         base_sha="base-12",
         patch_sha256="patch-12",
-        verification_id="verification-12",
-        quota_reservation_id="quota-12",
+        verification_id=verification_id,
+        quota_reservation_id=quota_id,
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )
 
     assert permit.review_id == request.id
     assert permit.approved_side_effects == frozenset({PublishSideEffect.CREATE_PR})
+    current = await commands.get(item.id)
+    assert current.state is WorkState.PUBLISH_RESERVED
     cursor = await memory.connection.execute("SELECT COUNT(*) FROM publish_permits")
     assert (await cursor.fetchone())[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_shadow_and_review_only_work_cannot_issue_publish_permit(memory) -> None:
+    for mode in (ExecutionMode.SHADOW, ExecutionMode.REVIEW_ONLY):
+        commands = CommandService(memory)
+        item = await commands.submit(
+            f"owner/{mode.value}",
+            mode=mode,
+            idempotency_key=f"mode-{mode.value}",
+        )
+        item = await _advance(
+            memory,
+            item,
+            WorkState.QUALIFIED,
+            WorkState.RESERVED,
+            WorkState.PREPARING,
+            WorkState.SOLVING,
+            WorkState.PATCH_COLLECTING,
+            WorkState.PATCHED,
+            WorkState.VERIFYING,
+        )
+        item, verification_id = await commands.record_verification(
+            item.id,
+            _passing_report(f"patch-{mode.value}"),
+        )
+        request = await commands.request_review(
+            item.id,
+            f"patch-{mode.value}",
+            required_side_effects=(PublishSideEffect.CREATE_PR,),
+        )
+        item = await commands.approve(request.id, f"patch-{mode.value}")
+        with pytest.raises(CommandStateError, match="live"):
+            await commands.issue_publish_permit(
+                item.id,
+                request.id,
+                base_sha="base",
+                patch_sha256=f"patch-{mode.value}",
+                verification_id=verification_id,
+                quota_reservation_id="quota",
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+
+
+@pytest.mark.asyncio
+async def test_permit_cannot_widen_reviewed_side_effect_scope(memory) -> None:
+    commands = CommandService(memory)
+    item = await commands.submit("owner/repo-scope", mode=ExecutionMode.LIVE)
+    item = await _advance(
+        memory,
+        item,
+        WorkState.QUALIFIED,
+        WorkState.RESERVED,
+        WorkState.PREPARING,
+        WorkState.SOLVING,
+        WorkState.PATCH_COLLECTING,
+        WorkState.PATCHED,
+        WorkState.VERIFYING,
+    )
+    item, verification_id = await commands.record_verification(
+        item.id,
+        _passing_report("scope-patch"),
+    )
+    request = await commands.request_review(
+        item.id,
+        "scope-patch",
+        required_side_effects=(PublishSideEffect.CREATE_PR,),
+    )
+    item = await commands.approve(request.id, "scope-patch")
+    quota_id = await commands.reserve_publish_quota(
+        item.id,
+        provider="github",
+        amount={"pull_requests": 1},
+    )
+    with pytest.raises(CommandStateError, match="widen"):
+        await commands.issue_publish_permit(
+            item.id,
+            request.id,
+            base_sha="base",
+            patch_sha256="scope-patch",
+            verification_id=verification_id,
+            quota_reservation_id=quota_id,
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            approved_side_effects=frozenset(
+                {PublishSideEffect.CREATE_PR, PublishSideEffect.CREATE_ISSUE}
+            ),
+        )
 
 
 @pytest.mark.asyncio
