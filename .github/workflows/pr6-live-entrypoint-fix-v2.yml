@@ -1,0 +1,104 @@
+name: PR6 Live Entrypoint Fix V2
+
+on:
+  push:
+    branches: [agent/fix-pr5-control-plane-blockers]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-live-entrypoints:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/fix-pr5-control-plane-blockers
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Patch live entrypoints fail closed
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              if new in text:
+                  return
+              if old not in text:
+                  raise RuntimeError(f"missing expected snippet in {path}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # CLI: scope replacements to the three control-plane commands only.
+          replace_once(
+              "contribai/cli/main.py",
+              '''    console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")\n\n    from contribai.orchestrator.pipeline import ContribPipeline\n\n    pipeline = ContribPipeline(config)\n    result = asyncio.run(pipeline.run(dry_run=dry_run))\n\n    # Print results\n    _print_result(result, dry_run)\n''',
+              '''    console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")\n\n    if execution_mode is ExecutionMode.LIVE:\n        console.print(\n            "   [yellow]LIVE request queued. Legacy direct publishing is disabled; "\n            "a control-plane worker must process this WorkItem.[/yellow]"\n        )\n        return\n\n    from contribai.orchestrator.pipeline import ContribPipeline\n\n    pipeline = ContribPipeline(config)\n    result = asyncio.run(pipeline.run(dry_run=execution_mode.dry_run))\n\n    # Print results\n    _print_result(result, execution_mode.dry_run)\n''',
+          )
+          replace_once(
+              "contribai/cli/main.py",
+              '''    console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")\n\n    from contribai.orchestrator.pipeline import ContribPipeline\n\n    pipeline = ContribPipeline(config)\n    result = asyncio.run(pipeline.run_single(url, dry_run=dry_run))\n    _print_result(result, dry_run)\n''',
+              '''    console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")\n\n    if execution_mode is ExecutionMode.LIVE:\n        console.print(\n            "   [yellow]LIVE request queued. Legacy direct publishing is disabled; "\n            "a control-plane worker must process this WorkItem.[/yellow]"\n        )\n        return\n\n    from contribai.orchestrator.pipeline import ContribPipeline\n\n    pipeline = ContribPipeline(config)\n    result = asyncio.run(pipeline.run_single(url, dry_run=execution_mode.dry_run))\n    _print_result(result, execution_mode.dry_run)\n''',
+          )
+          replace_once(
+              "contribai/cli/main.py",
+              '''    console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")\n\n    from contribai.orchestrator.pipeline import ContribPipeline\n\n    pipeline = ContribPipeline(config)\n    result = asyncio.run(pipeline.hunt(rounds=rounds, delay_sec=delay, dry_run=dry_run, mode=mode))\n    _print_result(result, dry_run)\n''',
+              '''    console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")\n\n    if execution_mode is ExecutionMode.LIVE:\n        console.print(\n            "   [yellow]LIVE request queued. Legacy direct publishing is disabled; "\n            "a control-plane worker must process this WorkItem.[/yellow]"\n        )\n        return\n\n    from contribai.orchestrator.pipeline import ContribPipeline\n\n    pipeline = ContribPipeline(config)\n    result = asyncio.run(\n        pipeline.hunt(\n            rounds=rounds,\n            delay_sec=delay,\n            dry_run=execution_mode.dry_run,\n            mode=mode,\n        )\n    )\n    _print_result(result, execution_mode.dry_run)\n''',
+          )
+
+          # Web background LIVE requests stop after durable queue submission.
+          replace_once(
+              "contribai/web/server.py",
+              '''    await _submit_control_command(config, repo_url, mode, source="web.run")\n    pipeline = ContribPipeline(config)\n''',
+              '''    work_item = await _submit_control_command(config, repo_url, mode, source="web.run")\n    if mode is ExecutionMode.LIVE:\n        logger.info(\n            "Queued LIVE web WorkItem %s; legacy direct publishing is disabled",\n            work_item.id if work_item else "<unavailable>",\n        )\n        return\n    pipeline = ContribPipeline(config)\n''',
+          )
+
+          # Scheduled LIVE work is queued, never handed to the legacy publisher.
+          replace_once(
+              "contribai/scheduler/scheduler.py",
+              '''        finally:\n            await memory.close()\n        pipeline = ContribPipeline(self.config)\n''',
+              '''        finally:\n            await memory.close()\n        if mode is ExecutionMode.LIVE:\n            logger.info(\n                "Scheduled LIVE WorkItem %s queued; legacy direct publishing is disabled",\n                work_item.id,\n            )\n            return\n        pipeline = ContribPipeline(self.config)\n''',
+          )
+
+          replace_once(
+              "docs/CONTRIBUTION_CONTROL_PLANE.md",
+              '''Status: active architecture for the current `4.1.0` codebase. The legacy\npipeline remains available as a transitional implementation behind the new\nentry-point command path; it is not the security authority for publishing.\n''',
+              '''Status: active safety/control-plane architecture for the current `4.1.0`\ncodebase. The durable queue, workspace/engine contracts, verification/review\nproofs, and publish gate are implemented. A proof-complete execution worker is\nnot yet wired into the legacy discovery pipeline, so LIVE entry points queue a\nWorkItem and do not fall back to legacy direct publishing.\n''',
+          )
+          replace_once(
+              "docs/CONTRIBUTION_CONTROL_PLANE.md",
+              '''The control-plane queueing and publish gate are active. Existing generator,\nissue-solver, and patrol implementations still contain legacy logic while\ntheir execution is migrated behind `EngineDriver`, `PatchCollector`, and\n`VerificationEngine`. Direct GitHub writes outside `GitHubPublisher` are\nblocked or delegated by the current architecture tests. Do not add a new\nengine-specific publisher or bypass `CommandService` from an entry point.\n''',
+              '''The control-plane queueing and publish gate are active. Existing generator,\nissue-solver, and patrol implementations still contain legacy logic while\ntheir execution is migrated behind `EngineDriver`, `PatchCollector`, and\n`VerificationEngine`. LIVE CLI/Web/Scheduler commands stop after durable queue\nsubmission until that worker is wired; SHADOW and REVIEW_ONLY may execute the\nlegacy pipeline only with `dry_run=True`. Direct GitHub writes outside\n`GitHubPublisher` are blocked by architecture tests. Do not add an\nengine-specific publisher or bypass `CommandService` from an entry point.\n''',
+          )
+
+          test_path = Path("tests/integration/test_entrypoints_control_plane.py")
+          tests = test_path.read_text(encoding="utf-8")
+          test = '''\n\n@pytest.mark.asyncio\nasync def test_scheduler_live_queues_without_legacy_publish(tmp_path) -> None:\n    config = ContribAIConfig(\n        github=GitHubConfig(token="test"),\n        llm=LLMConfig(provider="gemini", api_key="test"),\n        storage=StorageConfig(db_path=str(tmp_path / "scheduler-live.db")),\n    )\n    config.scheduler.mode = ExecutionMode.LIVE\n    pipeline = MagicMock()\n    pipeline.run = AsyncMock()\n\n    with patch("contribai.scheduler.scheduler.ContribPipeline", return_value=pipeline):\n        scheduler = ContribScheduler(config)\n        await scheduler._run_pipeline()\n\n    pipeline.run.assert_not_awaited()\n'''
+          if "test_scheduler_live_queues_without_legacy_publish" not in tests:
+              test_path.write_text(tests + test, encoding="utf-8")
+          PY
+      - name: Validate patched source
+        run: |
+          pip install -e ".[dev,mcp]"
+          ruff format contribai/ tests/
+          ruff check contribai/
+          ruff format --check contribai/ tests/
+          pytest -q tests/architecture tests/safety tests/execution tests/engines/contracts tests/engines/adapters tests/integration/test_entrypoints_control_plane.py
+          pytest -q tests/unit/test_publishing_idempotency.py tests/execution/test_credential_broker.py
+          python -m compileall -q contribai
+      - name: Commit validated patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No live-entrypoint patch needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add contribai/cli/main.py contribai/web/server.py contribai/scheduler/scheduler.py docs/CONTRIBUTION_CONTROL_PLANE.md tests/integration/test_entrypoints_control_plane.py
+          git commit -m "fix: queue live entrypoints behind control plane"
+          git push origin HEAD:agent/fix-pr5-control-plane-blockers
