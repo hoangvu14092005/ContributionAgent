@@ -7,6 +7,7 @@ import contextlib
 import os
 import shutil
 import signal
+import stat
 import time
 from pathlib import Path
 
@@ -100,11 +101,21 @@ class DockerWorkspace(LocalWorkspace):
                 raise WorkspaceError(stderr.strip() or "git checkout for Docker workspace failed")
 
             # An execution attempt must not have a configured remote it could push to.
-            await LocalWorkspace._run_git(workspace_path, "remote", "remove", "origin")
+            returncode, _, stderr = await LocalWorkspace._run_git(
+                workspace_path,
+                "remote",
+                "remove",
+                "origin",
+            )
+            if returncode != 0:
+                raise WorkspaceError(stderr.strip() or "failed to remove Docker workspace remote")
 
             uid, gid = _container_identity()
             if _host_is_root():
-                await asyncio.to_thread(_chown_tree, workspace_path, uid, gid)
+                # Keep the repository itself owned by root so host-side Git does
+                # not reject it as dubious ownership. Grant the sandbox group
+                # write access instead; setgid keeps new files in that group.
+                await asyncio.to_thread(_prepare_root_owned_tree, workspace_path, gid)
 
             return cls(
                 repository,
@@ -245,12 +256,22 @@ def _container_identity() -> tuple[int, int]:
     return _SAFE_CONTAINER_UID, _SAFE_CONTAINER_GID
 
 
-def _chown_tree(root: Path, uid: int, gid: int) -> None:
-    """Give the non-root container user ownership of a root-created clone."""
+def _prepare_root_owned_tree(root: Path, gid: int) -> None:
+    """Keep root ownership while granting the sandbox group recursive write access."""
     for current, directories, files in os.walk(root):
-        for name in (*directories, *files):
-            path = Path(current) / name
-            with contextlib.suppress(FileNotFoundError, PermissionError):
-                os.chown(path, uid, gid, follow_symlinks=False)
+        current_path = Path(current)
+        _grant_group_access(current_path, gid, directory=True)
+        for name in directories:
+            _grant_group_access(current_path / name, gid, directory=True)
+        for name in files:
+            _grant_group_access(current_path / name, gid, directory=False)
+
+
+def _grant_group_access(path: Path, gid: int, *, directory: bool) -> None:
     with contextlib.suppress(FileNotFoundError, PermissionError):
-        os.chown(root, uid, gid, follow_symlinks=False)
+        os.chown(path, -1, gid, follow_symlinks=False)
+        current_mode = path.stat(follow_symlinks=False).st_mode
+        group_bits = stat.S_IRGRP | stat.S_IWGRP
+        if directory:
+            group_bits |= stat.S_IXGRP | stat.S_ISGID
+        os.chmod(path, current_mode | group_bits, follow_symlinks=False)
