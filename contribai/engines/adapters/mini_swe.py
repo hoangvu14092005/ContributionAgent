@@ -65,7 +65,7 @@ class MiniSWEInProcessDriver(ExternalEngineDriver):
         factory = self._agent_factory or self._factory_from_explicit_module()
         if factory is None:
             raise AdapterUnavailableError(
-                "mini-SWE requires an explicitly injected reviewed runner or agent factory"
+                "mini-SWE binding requires an explicitly injected reviewed runner or agent factory"
             )
         agent = await invoke_callback(
             factory,
