@@ -42,6 +42,8 @@ class ReviewDecision:
 
     def __post_init__(self) -> None:
         action = str(self.action).strip().lower()
+        if action not in {self.APPROVE, self.REJECT, self.SKIP}:
+            raise ValueError(f"unknown review action: {action or '<empty>'}")
         object.__setattr__(self, "action", action)
         object.__setattr__(self, "reason", str(self.reason or "")[:2_000])
         object.__setattr__(
