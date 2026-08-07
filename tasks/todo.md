@@ -8,8 +8,8 @@ Checklist này bám theo plan canonical tại docs/superpowers/plans/2026-08-07-
 - [x] Task 1: Capability model và PolicyEngine.
 - [x] Task 2: PublishPermit, GitHubPublisher và idempotency.
 - [x] Task 3: Explicit execution mode, auth fail-closed và webhook an toàn.
-- [ ] Task 4: Gộp Human Review và khóa issue side effects.
-- [ ] Checkpoint 0: Không còn write bypass.
+- [x] Task 4: Gộp Human Review và khóa issue side effects.
+- [x] Checkpoint 0: Không còn write bypass.
 
 ## Phase 1 — Control plane
 
