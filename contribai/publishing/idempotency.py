@@ -21,7 +21,7 @@ class IdempotencyKey:
 
 
 class IdempotencyStore(Protocol):
-    """Storage seam that Task 5 can replace with persistent state."""
+    """Storage seam for publishing idempotency."""
 
     async def execute(self, key: IdempotencyKey, operation: Callable[[], Awaitable[T]]) -> T:
         """Run an operation once per key and return its shared outcome."""
@@ -29,7 +29,11 @@ class IdempotencyStore(Protocol):
 
 
 class InMemoryIdempotencyStore:
-    """Coalesce concurrent and later duplicate calls onto one async task."""
+    """Coalesce concurrent and later duplicate successful calls onto one task.
+
+    Failed or cancelled operations are evicted so a transient GitHub/API failure
+    does not poison the idempotency key for the lifetime of the process.
+    """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -42,4 +46,10 @@ class InMemoryIdempotencyStore:
                 task = asyncio.create_task(operation())
                 self._tasks[key] = task
 
-        return await asyncio.shield(task)  # type: ignore[return-value]
+        try:
+            return await asyncio.shield(task)  # type: ignore[return-value]
+        except BaseException:
+            async with self._lock:
+                if self._tasks.get(key) is task and task.done():
+                    self._tasks.pop(key, None)
+            raise
