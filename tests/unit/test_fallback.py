@@ -21,7 +21,7 @@ We focus on:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -33,7 +33,6 @@ from contribai.llm.fallback import (
     ProviderSlot,
     build_fallback_chains,
 )
-
 
 # ── ProviderSlot dataclass ──────────────────────────────────────────────────
 
@@ -112,7 +111,7 @@ class TestBuildFallbackChains:
 
     def test_default_chain_returned_separately(self, raw_chains):
         config = LLMConfig(fallback_chains=raw_chains)
-        chains, default_chain = build_fallback_chains(config)
+        _, default_chain = build_fallback_chains(config)
         assert default_chain[0].provider == "rocket-free-1"
 
     def test_missing_default_means_empty_default_chain(self):
@@ -210,9 +209,7 @@ class TestExecuteWithFallbackSuccess:
         inner.complete.return_value = "ok"
 
         slot = ProviderSlot(provider="x", base_url="http://a", model="m")
-        with patch(
-            "contribai.llm.fallback._create_provider_for_slot", return_value=inner
-        ):
+        with patch("contribai.llm.fallback._create_provider_for_slot", return_value=inner):
             p = FallbackChainProvider(llm_config, chains={"default": [slot]})
             result = await p.complete("hi")
             assert result == "ok"
@@ -240,9 +237,7 @@ class TestExecuteWithFallbackSuccess:
             "contribai.llm.fallback._create_provider_for_slot",
             side_effect=lambda *a, **kw: next(providers),
         ):
-            p = FallbackChainProvider(
-                llm_config, chains={"default": [slot1, slot2]}
-            )
+            p = FallbackChainProvider(llm_config, chains={"default": [slot1, slot2]})
             result = await p.complete("hi")
 
         assert result == "ok-from-second"
@@ -294,9 +289,7 @@ class TestExecuteWithFallbackAllFail:
             "contribai.llm.fallback._create_provider_for_slot",
             side_effect=lambda *a, **kw: next(providers),
         ):
-            p = FallbackChainProvider(
-                llm_config, chains={"default": [slot1, slot2]}
-            )
+            p = FallbackChainProvider(llm_config, chains={"default": [slot1, slot2]})
             with pytest.raises(LLMError):
                 await p.complete("hi")
 
@@ -372,9 +365,7 @@ class TestChatFallback:
         inner.chat.return_value = "chat-ok"
         slot = ProviderSlot(provider="x", base_url="http://a", model="m")
 
-        with patch(
-            "contribai.llm.fallback._create_provider_for_slot", return_value=inner
-        ):
+        with patch("contribai.llm.fallback._create_provider_for_slot", return_value=inner):
             p = FallbackChainProvider(llm_config, chains={"default": [slot]})
             result = await p.chat([{"role": "user", "content": "hi"}])
         assert result == "chat-ok"

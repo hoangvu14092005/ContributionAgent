@@ -1,4 +1,10 @@
-# ContribAI — Target Architecture v2
+# ContribAI — Historical Target Architecture v2
+
+> This planned v2 document predates the current WorkItem control plane. It is
+> retained as design history, not as an active call graph. See
+> [`CONTRIBUTION_CONTROL_PLANE.md`](CONTRIBUTION_CONTROL_PLANE.md) for the
+> implementation that currently owns workspace, verification, review, and
+> publish authority.
 
 After Layers A → D land, ContribAI's module graph looks like this. ASCII-first because
 [docs/ARCHITECTURE.md](ARCHITECTURE.md) is the v1 diagram; this is the planned v2.

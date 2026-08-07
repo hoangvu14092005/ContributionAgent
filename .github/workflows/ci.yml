@@ -37,12 +37,30 @@ jobs:
         run: pip install -e ".[dev,mcp]"
       - name: Run tests
         run: pytest tests/ -v --tb=short --cov=contribai --cov-report=term-missing --cov-fail-under=50
+      - name: Compile package
+        run: python -m compileall -q contribai
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: htmlcov/
+
+  architecture-safety:
+    name: Architecture & Safety Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -e ".[dev,mcp]"
+      - name: Run control-plane contracts
+        run: >-
+          pytest -q tests/architecture tests/safety tests/execution
+          tests/engines/contracts tests/engines/adapters
+          tests/integration/test_entrypoints_control_plane.py
 
   security:
     name: Security Check

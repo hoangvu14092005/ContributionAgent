@@ -22,7 +22,7 @@ from contribai.core.models import (
     Severity,
 )
 from contribai.core.text_utils import strip_think_blocks
-from contribai.localization import ContributionTask, Localizer, LocalizationSet
+from contribai.localization import ContributionTask, LocalizationSet, Localizer
 
 logger = logging.getLogger(__name__)
 

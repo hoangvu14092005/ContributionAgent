@@ -231,11 +231,11 @@ class ContextCompressor:
             prompt = ContextCompressor.COMPRESSION_PROMPT.format(
                 context=context[: max_summary_tokens * CHARS_PER_TOKEN * 4]
             )
-            
+
             # Set task type for custom provider
-            if hasattr(llm, 'set_task'):
-                llm.set_task('compression')
-            
+            if hasattr(llm, "set_task"):
+                llm.set_task("compression")
+
             response = await llm.complete(
                 prompt,
                 system="You are a concise technical summarizer.",

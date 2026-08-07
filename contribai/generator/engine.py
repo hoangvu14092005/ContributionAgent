@@ -21,11 +21,9 @@ from contribai.core.models import (
     FileChange,
     Finding,
     RepoContext,
-    Repository,
-    Severity,
 )
 from contribai.core.text_utils import strip_think_blocks
-from contribai.generator.style_validator import StyleValidator
+from contribai.generator.style_validator import StyleValidationResult, StyleValidator
 from contribai.llm.context import build_repo_context_prompt
 from contribai.llm.provider import LLMProvider
 
@@ -66,8 +64,8 @@ class ContributionGenerator:
             system = self._build_system_prompt(context)
 
             # Set task type for custom provider
-            if hasattr(self._llm, 'set_task'):
-                self._llm.set_task('code_gen')
+            if hasattr(self._llm, "set_task"):
+                self._llm.set_task("code_gen")
 
             changes = None
             last_error = ""
@@ -77,22 +75,25 @@ class ContributionGenerator:
                         "Retrying generation (attempt %d) for: %s", attempt + 1, finding.title
                     )
                     # On retry, suggest using full content mode if search/replace failed
-                    if "No valid changes could be parsed" in last_error or "failed syntax validation" in last_error:
+                    if (
+                        "No valid changes could be parsed" in last_error
+                        or "failed syntax validation" in last_error
+                    ):
                         retry_hint = (
                             f"\n\n## IMPORTANT: Your previous attempt failed.\n"
                             f"Error: {last_error}\n\n"
                             f"ALTERNATIVE APPROACH: Instead of search/replace blocks, "
                             f"provide the FULL NEW CONTENT for the file:\n\n"
                             f"```json\n"
-                            f'{{\n'
+                            f"{{\n"
                             f'  "changes": [\n'
-                            f'    {{\n'
+                            f"    {{\n"
                             f'      "path": "path/to/file",\n'
                             f'      "content": "complete new file content here",\n'
                             f'      "is_new_file": false\n'
-                            f'    }}\n'
-                            f'  ]\n'
-                            f'}}\n'
+                            f"    }}\n"
+                            f"  ]\n"
+                            f"}}\n"
                             f"```\n"
                         )
                     else:
@@ -115,17 +116,17 @@ class ContributionGenerator:
                 response_stripped = strip_think_blocks(response)
 
                 # Strip markdown code fences if present
-                if response_stripped.startswith('```json'):
+                if response_stripped.startswith("```json"):
                     response_stripped = response_stripped[7:]  # Remove ```json
-                elif response_stripped.startswith('```'):
+                elif response_stripped.startswith("```"):
                     response_stripped = response_stripped[3:]  # Remove ```
 
-                if response_stripped.endswith('```'):
+                if response_stripped.endswith("```"):
                     response_stripped = response_stripped[:-3]  # Remove trailing ```
 
                 response_stripped = response_stripped.strip()
 
-                if not response_stripped.startswith('{'):
+                if not response_stripped.startswith("{"):
                     last_error = (
                         "Response does not start with '{'. "
                         "You must return ONLY valid JSON, no markdown or explanations."
@@ -147,12 +148,13 @@ class ContributionGenerator:
                     )
                     changes = None
                     continue
-                
+
                 # 3c: Validate style (Phase 1 - Quick Win #3)
                 style_result = self._validate_style(changes, context)
                 if not style_result.passed:
                     last_error = (
-                        f"Generated code failed style validation (score: {style_result.score:.1f}/10). "
+                        f"Generated code failed style validation "
+                        f"(score: {style_result.score:.1f}/10). "
                         f"Issues: {'; '.join(style_result.issues[:2])}"
                     )
                     logger.warning(
@@ -169,7 +171,7 @@ class ContributionGenerator:
                 logger.warning(
                     "No valid changes after retries for finding: %s. Last error: %s",
                     finding.title,
-                    last_error
+                    last_error,
                 )
                 return None
 
@@ -358,12 +360,13 @@ class ContributionGenerator:
         if current_content:
             # Show more context to improve search/replace accuracy
             # Truncate only if extremely large (>20k chars)
-            content_to_show = current_content if len(current_content) <= 20000 else current_content[:20000]
-            prompt += (
-                f"\n## Current File Content ({finding.file_path})\n"
-                f"```\n{content_to_show}\n```\n"
+            content_to_show = (
+                current_content if len(current_content) <= 20000 else current_content[:20000]
             )
-            
+            prompt += (
+                f"\n## Current File Content ({finding.file_path})\n```\n{content_to_show}\n```\n"
+            )
+
             # For small files, suggest full content mode to avoid JSON escaping issues
             file_size = len(current_content)
             use_full_content = file_size < 5000  # Files under 5KB
@@ -384,7 +387,7 @@ class ContributionGenerator:
         prompt += (
             "CRITICAL JSON RULES:\n"
             "- Return ONLY the JSON object, nothing else\n"
-            "- Use double quotes (\") for all strings, NEVER backticks (`)\n"
+            '- Use double quotes (") for all strings, NEVER backticks (`)\n'
             "- No markdown code fences (```), no explanations\n"
             "- Ensure all brackets are balanced\n"
             "- Each key should appear only once\n\n"
@@ -430,8 +433,10 @@ class ContributionGenerator:
                     "}\n"
                     "```\n\n"
                     "CRITICAL RULES for search/replace:\n"
-                    "- `search` MUST be an EXACT, CHARACTER-FOR-CHARACTER copy from the file above\n"
-                    "- Copy the text EXACTLY including all whitespace, indentation, and line breaks\n"
+                    "- `search` MUST be an EXACT, CHARACTER-FOR-CHARACTER copy "
+                    "from the file above\n"
+                    "- Copy the text EXACTLY including all whitespace, indentation, "
+                    "and line breaks\n"
                     "- Include enough context (5-15 lines) to make the search unique\n"
                     "- `replace` is what replaces the search text (can be longer/shorter)\n"
                     "- To ADD new content, search for the text BEFORE the insertion "
@@ -573,9 +578,7 @@ class ContributionGenerator:
         # Extract conventions from context
         # If coding_style is a string, we need to parse it or use defaults
         # For now, we'll extract conventions from relevant_files
-        conventions = RepoConventions.extract_from_files(
-            context.repo, context.relevant_files
-        )
+        conventions = RepoConventions.extract_from_files(context.repo, context.relevant_files)
 
         # Validate each file change
         all_issues = []
@@ -670,8 +673,7 @@ class ContributionGenerator:
             json_text = self._extract_json(response)
             if not json_text:
                 logger.warning(
-                    "Could not extract JSON from LLM response. Response preview: %s",
-                    response[:500]
+                    "Could not extract JSON from LLM response. Response preview: %s", response[:500]
                 )
                 return []
 
@@ -685,7 +687,7 @@ class ContributionGenerator:
                     e.lineno,
                     e.colno,
                     e.msg,
-                    json_text[max(0, e.pos - 50):e.pos + 50] if e.pos else json_text[:100]
+                    json_text[max(0, e.pos - 50) : e.pos + 50] if e.pos else json_text[:100],
                 )
                 json_text = self._sanitize_json_strings(json_text)
                 try:
@@ -694,7 +696,7 @@ class ContributionGenerator:
                     logger.warning(
                         "JSON parse failed even after sanitization: %s. Sanitized JSON preview: %s",
                         e2,
-                        json_text[:500]
+                        json_text[:500],
                     )
                     return []
 
@@ -982,9 +984,9 @@ class ContributionGenerator:
 
         try:
             # Set task type for custom provider
-            if hasattr(self._llm, 'set_task'):
-                self._llm.set_task('review')
-            
+            if hasattr(self._llm, "set_task"):
+                self._llm.set_task("review")
+
             response = await self._llm.complete(prompt, temperature=0.1)
             approved = "APPROVE" in response.upper()
             if not approved:
@@ -997,53 +999,53 @@ class ContributionGenerator:
     @staticmethod
     def _sanitize_json_strings(json_text: str) -> str:
         """Sanitize JSON by escaping unescaped control characters in string values.
-        
+
         This handles cases where LLMs include literal newlines, tabs, etc. in JSON strings
         instead of properly escaping them as \\n, \\t, etc.
         """
         result = []
         in_string = False
         escape_next = False
-        
-        for i, char in enumerate(json_text):
+
+        for char in json_text:
             if escape_next:
                 # Already escaped, keep as-is
                 result.append(char)
                 escape_next = False
                 continue
-                
-            if char == '\\':
+
+            if char == "\\":
                 result.append(char)
                 escape_next = True
                 continue
-                
+
             if char == '"':
                 in_string = not in_string
                 result.append(char)
                 continue
-            
+
             if in_string:
                 # Inside a string - escape control characters
-                if char == '\n':
-                    result.append('\\n')
-                elif char == '\r':
-                    result.append('\\r')
-                elif char == '\t':
-                    result.append('\\t')
-                elif char == '\b':
-                    result.append('\\b')
-                elif char == '\f':
-                    result.append('\\f')
+                if char == "\n":
+                    result.append("\\n")
+                elif char == "\r":
+                    result.append("\\r")
+                elif char == "\t":
+                    result.append("\\t")
+                elif char == "\b":
+                    result.append("\\b")
+                elif char == "\f":
+                    result.append("\\f")
                 elif ord(char) < 32:
                     # Other control characters - use unicode escape
-                    result.append(f'\\u{ord(char):04x}')
+                    result.append(f"\\u{ord(char):04x}")
                 else:
                     result.append(char)
             else:
                 # Outside string - keep as-is
                 result.append(char)
-        
-        return ''.join(result)
+
+        return "".join(result)
 
     @staticmethod
     def _extract_json(response: str) -> str | None:
@@ -1092,7 +1094,7 @@ class ContributionGenerator:
                 escape_next = False
                 continue
 
-            if char == '\\':
+            if char == "\\":
                 escape_next = True
                 continue
 

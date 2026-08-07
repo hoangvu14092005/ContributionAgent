@@ -39,12 +39,18 @@ Checklist này bám theo plan canonical tại docs/superpowers/plans/2026-08-07-
 
 ## Phase 4 — Optional expansion
 
-- [ ] Task 15.1: MiniSWEInProcessDriver.
-- [ ] Task 15.2: OpenHandsSDKDriver trong outer sandbox.
-- [ ] Task 15.3: OpenCodeServerDriver.
-- [ ] Task 15.4: CodexExecDriver.
-- [ ] Task 15.5: CodexAppServerDriver.
-- [ ] Shared engine contract suite: in-process/CLI/server, credential, cancel, diff, budget, no-publish.
-- [ ] Task 16: Outcome learning và benchmark.
-- [ ] Task 17: CI, packaging, docs và cleanup.
+- [x] Task 15.1: MiniSWEInProcessDriver.
+- [x] Task 15.2: OpenHandsSDKDriver trong outer sandbox.
+- [x] Task 15.3: OpenCodeServerDriver.
+- [x] Task 15.4: CodexExecDriver.
+- [x] Task 15.5: CodexAppServerDriver.
+- [x] Shared engine contract suite: in-process/CLI/server, credential, cancel, diff, budget, no-publish.
+- [x] Task 16: Outcome learning và benchmark.
+- [x] Task 17: CI, packaging, docs và cleanup.
 - [ ] Checkpoint 4: Release readiness.
+
+> Task 17 validation is complete. Checkpoint 4 remains open because the full
+> suite still has six pre-existing `tests/unit/test_skill_loader.py` failures
+> caused by missing `.agents/knowledge` and trigger metadata in this checkout;
+> control-plane focused suites, lint, format, compile, coverage threshold, and
+> Docker build pass.

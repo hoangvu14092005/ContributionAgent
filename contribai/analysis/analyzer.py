@@ -30,7 +30,7 @@ from contribai.core.models import (
 from contribai.core.text_utils import strip_think_blocks
 from contribai.github.client import GitHubClient
 from contribai.llm.provider import LLMProvider
-from contribai.localization import ContributionTask, Localizer, LocalizationSet
+from contribai.localization import ContributionTask, LocalizationSet, Localizer
 
 logger = logging.getLogger(__name__)
 
@@ -793,6 +793,7 @@ class CodeAnalyzer:
         """Parse LLM response into Finding objects."""
         import json
         import re
+
         import yaml
 
         findings: list[Finding] = []
@@ -810,7 +811,6 @@ class CodeAnalyzer:
 
         # Strip `` blocks (MiniMax-M3 and similar models prepend reasoning)
         # Layer A: consolidated into contribai.core.text_utils (was inline duplicate in 4 files)
-        from contribai.core.text_utils import strip_think_blocks
 
         response = strip_think_blocks(response)
 

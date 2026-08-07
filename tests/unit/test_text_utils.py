@@ -102,6 +102,7 @@ class TestStripThinkBlocks:
         result = strip_think_blocks(text)
         assert result == '{"changes": [{"path": "x.py"}]}'
         import json
+
         parsed = json.loads(result)
         assert parsed["changes"][0]["path"] == "x.py"
 
@@ -142,7 +143,7 @@ class TestBehavioralParity:
     def test_extract_json_parity(self):
         # engine.py:_extract_json originally stripped leading/trailing/newlines
         # then ran both patterns.
-        text = f"{_wrap_think()}\n{{\"k\": \"v\"}}"
+        text = f'{_wrap_think()}\n{{"k": "v"}}'
         result = strip_think_blocks(text)
         assert result.startswith("{") and result.endswith("}")
 
