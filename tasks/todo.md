@@ -23,12 +23,12 @@ Checklist này bám theo plan canonical tại docs/superpowers/plans/2026-08-07-
 
 - [x] Task 8: ContributionContext, RepoRules và ContextEngine.
 - [x] Task 9: Hierarchical localization.
-- [ ] Task 10A: Engine runtime contract (`EngineDriver`/`EngineOutcome`).
-- [ ] Task 10B: EngineRouter và `NativeEngineDriver`.
-- [ ] Task 10C: `PatchCollector` và candidate assembly.
-- [ ] Task 10D: Capability probe và version pinning.
-- [ ] Task 11: VerificationEngine và repair feedback loop.
-- [ ] Checkpoint 2: Driver, clean snapshots và CandidateSet có evidence xác minh.
+- [x] Task 10A: Engine runtime contract (`EngineDriver`/`EngineOutcome`).
+- [x] Task 10B: EngineRouter và `NativeEngineDriver`.
+- [x] Task 10C: `PatchCollector` và candidate assembly.
+- [x] Task 10D: Capability probe và version pinning.
+- [x] Task 11: VerificationEngine và repair feedback loop.
+- [x] Checkpoint 2: Driver, clean snapshots và CandidateSet có evidence xác minh.
 
 ## Phase 3 — Product integration
 
