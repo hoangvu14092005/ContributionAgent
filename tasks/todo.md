@@ -13,7 +13,7 @@ Checklist này bám theo plan canonical tại docs/superpowers/plans/2026-08-07-
 
 ## Phase 1 — Control plane
 
-- [ ] Task 5: WorkItem state machine và persistent storage.
+- [x] Task 5: WorkItem state machine và persistent storage.
 - [ ] Task 6: LLMRequest, budget và trajectory.
 - [ ] Task 7A: Workspace abstraction và clean attempt snapshots.
 - [ ] Task 7B: CredentialBroker và model gateway.
