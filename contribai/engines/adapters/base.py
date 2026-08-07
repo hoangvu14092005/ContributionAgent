@@ -1,9 +1,4 @@
-"""Shared safety and result helpers for optional external engine drivers.
-
-External runtimes are deliberately kept behind a small adapter seam.  This
-module contains only execution-boundary plumbing; it never collects a patch or
-knows how to publish a contribution.
-"""
+"""Shared safety and result helpers for optional external engine drivers."""
 
 from __future__ import annotations
 
@@ -52,14 +47,28 @@ class AdapterResult:
 
 
 def require_workspace(execution: ExecutionLease) -> Workspace:
-    """Return the outer workspace or fail closed before starting a runtime."""
+    """Return the exact outer workspace bound to this execution lease."""
     workspace = execution.workspace
     if workspace is None:
         raise AdapterUnavailableError("external engine requires an outer workspace lease")
     path = Path(workspace.path)
     if not path.is_absolute():
         raise EngineBoundaryError("outer workspace path must be absolute")
+    if getattr(workspace, "snapshot_id", None) != execution.workspace_ref:
+        raise EngineBoundaryError("outer workspace snapshot does not match execution lease")
+    if getattr(workspace, "attempt_id", None) != execution.attempt_id:
+        raise EngineBoundaryError("outer workspace attempt does not match execution lease")
     return workspace
+
+
+def require_execution_scope(request: EngineRequest, execution: ExecutionLease) -> None:
+    """Bind a request to one exact work item, attempt and budget contract."""
+    if request.work_id != execution.work_id:
+        raise EngineBoundaryError("engine request work scope does not match execution lease")
+    if request.attempt_id != execution.attempt_id:
+        raise EngineBoundaryError("engine request attempt scope does not match execution lease")
+    if request.budget.snapshot().to_json() != execution.budget.snapshot().to_json():
+        raise EngineBoundaryError("engine request budget does not match execution lease")
 
 
 def scoped_environment(execution: ExecutionLease, workspace: Workspace) -> dict[str, str]:
@@ -86,15 +95,17 @@ def require_model_access(execution: ExecutionLease) -> None:
         raise EngineBoundaryError("credential lease work scope does not match execution")
     if execution.credential_lease and execution.credential_lease.attempt_id != execution.attempt_id:
         raise EngineBoundaryError("credential lease attempt scope does not match execution")
+    if execution.credential_lease and execution.credential_lease.expires_at <= __import__(
+        "datetime"
+    ).datetime.now(execution.credential_lease.expires_at.tzinfo):
+        raise EngineBoundaryError("credential lease has expired")
 
 
 def bounded_text(value: object, *, limit: int = MAX_ADAPTER_EVENT_CHARS) -> str:
-    """Convert runtime output to bounded text before it enters a trajectory."""
     return str(value)[:limit]
 
 
 def normalize_events(values: Iterable[object]) -> tuple[ExecutionEvent, ...]:
-    """Convert SDK/CLI event values to bounded typed trajectory events."""
     normalized: list[ExecutionEvent] = []
     for raw in values:
         if len(normalized) >= MAX_ADAPTER_EVENTS:
@@ -124,7 +135,6 @@ def _bound_event_value(value: object) -> object:
 
 
 def coerce_result(value: object) -> AdapterResult | EngineOutcome:
-    """Normalize common SDK/fake-runtime result shapes without patch fields."""
     if isinstance(value, EngineOutcome):
         return value
     if value is None:
@@ -147,9 +157,7 @@ def coerce_result(value: object) -> AdapterResult | EngineOutcome:
         raw_events = value.get("events", ())
         if isinstance(raw_events, (str, bytes)):
             raw_events = (
-                raw_events.decode(errors="replace")
-                if isinstance(raw_events, bytes)
-                else raw_events,
+                raw_events.decode(errors="replace") if isinstance(raw_events, bytes) else raw_events,
             )
         metadata = value.get("metadata", {})
         if not isinstance(metadata, Mapping):
@@ -174,12 +182,6 @@ async def invoke_callback(
     prompt: str,
     **extra: object,
 ) -> object:
-    """Invoke an injected SDK/runner using only parameters it declares.
-
-    This keeps adapter tests deterministic while allowing a runtime-native
-    callback to choose a small signature such as ``(request, execution)`` or
-    richer named inputs such as ``(workspace_path, prompt, model_gateway)``.
-    """
     values: dict[str, object] = {
         "request": request,
         "execution": execution,
@@ -228,17 +230,11 @@ class ExternalEngineDriver:
     engine_name = "external"
     engine_version = "external@unknown"
 
-    def __init__(
-        self,
-        *,
-        require_gateway: bool = True,
-        max_events: int = MAX_ADAPTER_EVENTS,
-    ) -> None:
+    def __init__(self, *, require_gateway: bool = True, max_events: int = MAX_ADAPTER_EVENTS) -> None:
         self.require_gateway = require_gateway
         self.max_events = max(1, max_events)
 
     async def run(self, request: EngineRequest, execution: ExecutionLease) -> EngineOutcome:
-        """Run one external attempt and return bounded audit evidence."""
         started = time.monotonic()
         trajectory_id = f"{request.work_id}:{request.attempt_id}:{self.engine_name}"
         try:
@@ -252,6 +248,7 @@ class ExternalEngineDriver:
                     started,
                 )
             workspace = require_workspace(execution)
+            require_execution_scope(request, execution)
             if self.require_gateway:
                 require_model_access(execution)
             await execution.budget.consume_step()
@@ -296,32 +293,25 @@ class ExternalEngineDriver:
             )
         except AdapterUnavailableError as exc:
             return self.make_outcome(
-                request,
-                EngineStatus.UNSUPPORTED,
-                str(exc),
-                trajectory_id,
-                started,
+                request, EngineStatus.UNSUPPORTED, str(exc), trajectory_id, started
             )
         except BudgetExceededError as exc:
             return self.make_outcome(
-                request,
-                EngineStatus.TIMED_OUT,
-                str(exc),
-                trajectory_id,
-                started,
+                request, EngineStatus.TIMED_OUT, str(exc), trajectory_id, started
             )
         except TimeoutError as exc:
             return self.make_outcome(
+                request, EngineStatus.TIMED_OUT, str(exc), trajectory_id, started
+            )
+        except EngineBoundaryError as exc:
+            return self.make_outcome(
                 request,
-                EngineStatus.TIMED_OUT,
+                EngineStatus.CANCELLED if execution.cancelled else EngineStatus.TIMED_OUT,
                 str(exc),
                 trajectory_id,
                 started,
             )
-        except EngineBoundaryError as exc:
-            status = EngineStatus.CANCELLED if execution.cancelled else EngineStatus.TIMED_OUT
-            return self.make_outcome(request, status, str(exc), trajectory_id, started)
-        except Exception as exc:  # runtime failures become resumable evidence
+        except Exception as exc:
             return self.make_outcome(
                 request,
                 EngineStatus.FAILED,
@@ -337,7 +327,6 @@ class ExternalEngineDriver:
         workspace: Workspace,
         started: float,
     ) -> object:
-        """Run the runtime-specific operation; subclasses must implement it."""
         raise NotImplementedError
 
     def make_outcome(
@@ -353,7 +342,6 @@ class ExternalEngineDriver:
         cost_usd: float = 0.0,
         metadata: Mapping[str, object] | None = None,
     ) -> EngineOutcome:
-        """Build one bounded outcome with adapter identity and no patch data."""
         usage = usage or EngineUsage()
         if usage.duration_sec == 0:
             usage = EngineUsage(
@@ -387,11 +375,8 @@ async def wait_with_cancel(
     timeout_sec: float | None = None,
     on_cancel: Callable[[], Awaitable[object] | object] | None = None,
 ) -> object:
-    """Wait for a runtime operation while honoring timeout and lease cancel."""
     operation_task = asyncio.create_task(operation)
-    cancel_task = (
-        asyncio.create_task(execution.cancel_event.wait()) if execution.cancel_event else None
-    )
+    cancel_task = asyncio.create_task(execution.cancel_event.wait()) if execution.cancel_event else None
     try:
         tasks = {operation_task}
         if cancel_task:
@@ -435,6 +420,7 @@ __all__ = [
     "coerce_result",
     "invoke_callback",
     "normalize_events",
+    "require_execution_scope",
     "require_model_access",
     "require_workspace",
     "scoped_environment",
