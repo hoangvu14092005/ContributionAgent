@@ -53,7 +53,7 @@ class ReviewService:
         required_side_effects: Iterable[PublishSideEffect] = (),
         ttl_seconds: float | None = None,
     ) -> ReviewRequest:
-        """Create or return the pending request for one work-item candidate."""
+        """Create or return the pending request for one exact candidate/scope."""
         if not work_id.strip():
             raise ValueError("work_id must not be empty")
         if not candidate_hash.strip():
@@ -68,6 +68,7 @@ class ReviewService:
             raise ValueError("ttl_seconds must be positive")
         expires_at = now + timedelta(seconds=ttl)
         effects = frozenset(PublishSideEffect(effect) for effect in required_side_effects)
+        effects_json = json.dumps(sorted(effect.value for effect in effects))
 
         async with self._lock:
             cursor = await self._memory.connection.execute(
@@ -75,13 +76,34 @@ class ReviewService:
                 SELECT id FROM review_requests
                 WHERE work_item_id = ? AND attempt = ? AND status = ?
                   AND json_extract(request_json, '$.candidate_hash') = ?
+                  AND required_side_effects_json = ?
                 ORDER BY created_at DESC LIMIT 1
                 """,
-                (work_id, work_item.attempt, ReviewStatus.PENDING.value, candidate_hash),
+                (
+                    work_id,
+                    work_item.attempt,
+                    ReviewStatus.PENDING.value,
+                    candidate_hash,
+                    effects_json,
+                ),
             )
             existing = await cursor.fetchone()
             if existing is not None:
-                return await self._get_unlocked(existing[0])
+                request = await self._get_unlocked(existing[0])
+                if request.expires_at > now:
+                    return request
+                await self._memory.connection.execute(
+                    """
+                    UPDATE review_requests SET status = ?, updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        ReviewStatus.EXPIRED.value,
+                        now.isoformat(),
+                        request.id,
+                        ReviewStatus.PENDING.value,
+                    ),
+                )
 
             review_id = f"review-{uuid.uuid4().hex}"
             await self._memory.connection.execute(
@@ -96,7 +118,7 @@ class ReviewService:
                     work_id,
                     work_item.attempt,
                     ReviewStatus.PENDING.value,
-                    json.dumps(sorted(effect.value for effect in effects)),
+                    effects_json,
                     json.dumps(
                         {
                             "candidate_hash": candidate_hash,
@@ -113,7 +135,7 @@ class ReviewService:
             return await self._get_unlocked(review_id)
 
     async def decide(self, review_id: str, decision: ReviewDecision) -> ReviewRequest:
-        """Apply one hash-bound decision and return the persisted request."""
+        """Apply one hash/scope-bound decision and return the persisted request."""
         request = await self.get(review_id)
         if request.status is ReviewStatus.EXPIRED:
             raise ReviewExpiredError(f"Review request expired: {review_id}")
@@ -122,6 +144,12 @@ class ReviewService:
         if decision.candidate_hash != request.candidate_hash:
             raise CandidateHashMismatchError(
                 "Review decision candidate hash does not match the persisted request"
+            )
+        if decision.approved and not decision.approved_side_effects.issubset(
+            request.required_side_effects
+        ):
+            raise ReviewStateError(
+                "Review decision cannot approve side effects outside the requested scope"
             )
 
         status = ReviewStatus.APPROVED if decision.approved else ReviewStatus.REJECTED
