@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from contribai.core.models import FeedbackAction, FeedbackItem, PatrolResult
+from contribai.domain.state import WorkState
 from contribai.pr.patrol import (
     OUR_REPLY_MARKERS,
     REVIEW_BOT_LOGINS,
@@ -329,6 +330,42 @@ class TestBuildFixPrompt:
         )
         prompt = patrol._build_fix_prompt(item, "", None, "diff content")
         assert "@@ -1,3 +1,4 @@" in prompt
+
+
+@pytest.mark.asyncio
+async def test_feedback_creates_work_item_instead_of_pushing(memory):
+    patrol = PRPatrol(
+        github=MagicMock(),
+        llm=MagicMock(),
+        work_items=memory.work_items,
+    )
+    feedback = FeedbackItem(
+        comment_id=991,
+        author="maintainer",
+        body="Please handle the edge case.",
+        action=FeedbackAction.CODE_CHANGE,
+        file_path="src/service.py",
+        line=12,
+        is_inline=True,
+    )
+
+    fixed = await patrol._handle_code_fix(
+        "owner",
+        "repo",
+        {"number": 17},
+        {"number": 17},
+        feedback,
+    )
+
+    assert fixed is False
+    cursor = await memory.connection.execute(
+        "SELECT id, state FROM work_items WHERE repo = ?", ("owner/repo",)
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    assert row[1] == WorkState.DISCOVERED.value
+    events = await memory.work_items.list_events(row[0])
+    assert events[-1].event_type == "feedback_received"
 
 
 class TestExtractFixedContent:

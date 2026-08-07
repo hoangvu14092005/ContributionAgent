@@ -427,7 +427,7 @@ def patrol(ctx, dry_run, pr_number):
 
             console.print(f"📋 Found {len(pr_records)} open PR(s) to check\n")
 
-            patrol_engine = PRPatrol(github=github, llm=llm)
+            patrol_engine = PRPatrol(github=github, llm=llm, work_items=memory.work_items)
             result = await patrol_engine.patrol(pr_records, dry_run=dry_run, pr_filter=pr_number)
 
             # Print results

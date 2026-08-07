@@ -6,18 +6,29 @@ classify feedback, generates code fixes, and pushes updates.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from typing import TYPE_CHECKING
 
 import yaml
 
+from contribai.control.mode import ExecutionMode
 from contribai.core.models import (
     FeedbackAction,
     FeedbackItem,
     PatrolResult,
 )
 from contribai.core.text_utils import strip_think_blocks
+from contribai.domain.work_item import BudgetSnapshot, WorkItem
 from contribai.github.client import GitHubClient
 from contribai.llm.provider import LLMProvider
+from contribai.review.dynamic_context import build_dynamic_review_context
+from contribai.storage.work_items import DuplicateWorkItemError, WorkItemRepository
+
+if TYPE_CHECKING:
+    from contribai.context.rules import ResolvedRepoRules
+    from contribai.core.models import Issue
+    from contribai.verification.models import VerificationReport
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +64,13 @@ class PRPatrol:
         self,
         github: GitHubClient,
         llm: LLMProvider,
+        *,
+        work_items: WorkItemRepository | None = None,
     ):
         self._github = github
         self._llm = llm
         self._user: dict | None = None
+        self._work_items = work_items
 
     async def _get_user(self) -> dict:
         if not self._user:
@@ -511,6 +525,7 @@ class PRPatrol:
         feedback: FeedbackItem,
     ) -> bool:
         """Fail closed until patrol receives a permit-bearing publisher command."""
+        await self._enqueue_feedback_work_item(owner, repo, pr_data, feedback)
         logger.warning(
             "Review fix for %s/%s#%s was not applied: a publisher permit is required",
             owner,
@@ -519,15 +534,69 @@ class PRPatrol:
         )
         return False
 
+    async def _enqueue_feedback_work_item(
+        self,
+        owner: str,
+        repo: str,
+        pr_data: dict,
+        feedback: FeedbackItem,
+    ) -> str | None:
+        """Create a durable repair WorkItem instead of mutating a PR in patrol."""
+        if self._work_items is None:
+            return None
+        pr_number = int(pr_data.get("number", 0))
+        identity = f"{owner}/{repo}#{pr_number}:{feedback.comment_id}"
+        work_id = f"feedback-{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
+        item = WorkItem.new(
+            work_id=work_id,
+            repo=f"{owner}/{repo}",
+            issue_number=None,
+            mode=ExecutionMode.REVIEW_ONLY,
+            budget=BudgetSnapshot.empty(),
+        )
+        try:
+            await self._work_items.create(item)
+        except DuplicateWorkItemError:
+            return work_id
+        await self._work_items.append_event(
+            work_id,
+            "feedback_received",
+            expected_version=item.version,
+            payload={
+                "pull_request": pr_number,
+                "comment_id": feedback.comment_id,
+                "author": feedback.author,
+                "action": feedback.action.value,
+                "file_path": feedback.file_path or "",
+                "line": feedback.line or 0,
+                "body": feedback.body[:2_000],
+            },
+        )
+        return work_id
+
     def _build_fix_prompt(
         self,
         feedback: FeedbackItem,
         file_content: str,
         file_path: str | None,
         diff: str,
+        *,
+        repo_rules: ResolvedRepoRules | str | None = None,
+        issue: Issue | str | None = None,
+        verification: VerificationReport | list[str] | None = None,
     ) -> str:
         """Build the LLM prompt to generate a code fix."""
         parts = [f"A reviewer left this feedback on a pull request:\n\n> {feedback.body}"]
+
+        dynamic_context = build_dynamic_review_context(
+            diff=diff,
+            files={file_path: file_content} if file_path and file_content else {},
+            repo_rules=repo_rules,
+            issue=issue,
+            verification=verification,
+        )
+        if dynamic_context.text:
+            parts.append(f"\nDynamic review context:\n{dynamic_context.text}")
 
         if feedback.bot_context:
             parts.append(
@@ -577,6 +646,7 @@ class PRPatrol:
         feedback: FeedbackItem,
     ) -> bool:
         """Fail closed until patrol receives a permit-bearing publisher command."""
+        await self._enqueue_feedback_work_item(owner, repo, pr_data, feedback)
         logger.warning(
             "Reply to @%s on %s/%s#%s was not posted: a publisher permit is required",
             feedback.author,

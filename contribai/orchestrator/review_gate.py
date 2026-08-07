@@ -15,42 +15,11 @@ from rich.table import Table
 from rich.text import Text
 
 from contribai.publishing.permit import PublishSideEffect
+from contribai.review.models import ReviewDecision
+from contribai.review.service import ReviewService
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-
-class ReviewDecision:
-    """Result of a human review decision."""
-
-    APPROVE = "approve"
-    REJECT = "reject"
-    SKIP = "skip"
-
-    def __init__(
-        self,
-        action: str,
-        reason: str = "",
-        *,
-        approved_side_effects: frozenset[PublishSideEffect] = frozenset(),
-    ):
-        self.action = action
-        self.reason = reason
-        self.approved_side_effects = (
-            approved_side_effects if action == self.APPROVE else frozenset()
-        )
-
-    @property
-    def approved(self) -> bool:
-        return self.action == self.APPROVE
-
-    @property
-    def rejected(self) -> bool:
-        return self.action == self.REJECT
-
-    @property
-    def skipped(self) -> bool:
-        return self.action == self.SKIP
 
 
 class HumanReviewer:
@@ -60,8 +29,14 @@ class HumanReviewer:
     in a Rich-formatted terminal UI, then prompts for approval.
     """
 
-    def __init__(self, *, auto_approve: bool = False):
+    def __init__(
+        self,
+        *,
+        auto_approve: bool = False,
+        review_service: ReviewService | None = None,
+    ):
         self._auto_approve = auto_approve
+        self._review_service = review_service
 
     async def review(
         self,
@@ -70,6 +45,8 @@ class HumanReviewer:
         repo_name: str,
         *,
         planned_side_effects: tuple[PublishSideEffect, ...] = (),
+        work_id: str | None = None,
+        candidate_hash: str | None = None,
     ) -> ReviewDecision:
         """Present a contribution for human review.
 
@@ -81,16 +58,35 @@ class HumanReviewer:
         Returns:
             ReviewDecision with the user's choice.
         """
-        if self._auto_approve:
-            return ReviewDecision(ReviewDecision.APPROVE)
+        request = None
+        if self._review_service is not None and work_id and candidate_hash:
+            request = await self._review_service.request(
+                work_id,
+                candidate_hash,
+                required_side_effects=planned_side_effects,
+            )
 
-        self._display_review(
-            contribution,
-            finding,
-            repo_name,
-            planned_side_effects=planned_side_effects,
-        )
-        return self._prompt_decision()
+        if self._auto_approve:
+            decision = ReviewDecision(
+                ReviewDecision.APPROVE,
+                candidate_hash=candidate_hash,
+                approved_side_effects=(
+                    frozenset(planned_side_effects) if request is not None else frozenset()
+                ),
+            )
+        else:
+            self._display_review(
+                contribution,
+                finding,
+                repo_name,
+                planned_side_effects=planned_side_effects,
+            )
+            decision = self._prompt_decision()
+
+        if request is None:
+            return decision
+        persisted = await self._review_service.decide(request.id, decision.bind(candidate_hash))
+        return persisted.decision or decision
 
     def _display_review(
         self,
@@ -219,9 +215,18 @@ class HumanReviewer:
 class ReviewGate:
     """Central review boundary shared by code-scan and issue-solving paths."""
 
-    def __init__(self, reviewer: HumanReviewer, *, explicit_human_review: bool) -> None:
+    def __init__(
+        self,
+        reviewer: HumanReviewer,
+        *,
+        explicit_human_review: bool,
+        review_service: ReviewService | None = None,
+    ) -> None:
         self._reviewer = reviewer
         self._explicit_human_review = explicit_human_review
+        self._review_service = review_service
+        if review_service is not None and isinstance(reviewer, HumanReviewer):
+            reviewer._review_service = review_service
 
     async def review(
         self,
@@ -230,6 +235,8 @@ class ReviewGate:
         repo_name: str,
         *,
         planned_side_effects: tuple[PublishSideEffect, ...] = (),
+        work_id: str | None = None,
+        candidate_hash: str | None = None,
     ) -> ReviewDecision:
         """Require explicit human approval before creating a new upstream issue."""
         if (
@@ -245,16 +252,21 @@ class ReviewGate:
                 "planned issue creation requires explicit human review",
             )
 
-        decision = await self._reviewer.review(
-            contribution,
-            finding,
-            repo_name,
-            planned_side_effects=planned_side_effects,
-        )
+        reviewer_kwargs = {"planned_side_effects": planned_side_effects}
+        if work_id is not None:
+            reviewer_kwargs["work_id"] = work_id
+        if candidate_hash is not None:
+            reviewer_kwargs["candidate_hash"] = candidate_hash
+        decision = await self._reviewer.review(contribution, finding, repo_name, **reviewer_kwargs)
         if decision.approved is not True:
-            return ReviewDecision(decision.action, decision.reason)
+            return ReviewDecision(
+                decision.action,
+                decision.reason,
+                candidate_hash=decision.candidate_hash,
+            )
         return ReviewDecision(
             ReviewDecision.APPROVE,
             decision.reason,
+            candidate_hash=decision.candidate_hash,
             approved_side_effects=frozenset(planned_side_effects),
         )
