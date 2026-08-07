@@ -60,6 +60,7 @@ class NativeEngineDriver:
         trajectory_id = f"{request.work_id}:{request.attempt_id}:native"
         try:
             execution.assert_active()
+            self._require_scope(request, execution)
             if execution.cancelled:
                 return self._outcome(
                     request,
@@ -118,7 +119,7 @@ class NativeEngineDriver:
                 trajectory_id,
                 started,
             )
-        except Exception as exc:  # engine failures become evidence, not control-plane crashes
+        except Exception as exc:
             return self._outcome(
                 request,
                 EngineStatus.FAILED,
@@ -126,6 +127,21 @@ class NativeEngineDriver:
                 trajectory_id,
                 started,
             )
+
+    @staticmethod
+    def _require_scope(request: EngineRequest, execution: ExecutionLease) -> None:
+        if request.work_id != execution.work_id:
+            raise EngineBoundaryError("engine request work scope does not match execution lease")
+        if request.attempt_id != execution.attempt_id:
+            raise EngineBoundaryError("engine request attempt scope does not match execution lease")
+        if request.budget.snapshot().to_json() != execution.budget.snapshot().to_json():
+            raise EngineBoundaryError("engine request budget does not match execution lease")
+        workspace = execution.workspace
+        if workspace is not None:
+            if getattr(workspace, "snapshot_id", None) != execution.workspace_ref:
+                raise EngineBoundaryError("native workspace snapshot does not match execution lease")
+            if getattr(workspace, "attempt_id", None) != execution.attempt_id:
+                raise EngineBoundaryError("native workspace attempt does not match execution lease")
 
     def _outcome(
         self,
