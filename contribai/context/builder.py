@@ -61,7 +61,9 @@ class ContextBuilder:
 
         resolved_rules = _resolve_rules(repo_rules, source_files)
         symbol_index = SymbolIndex.build(source_files)
-        repo_map = RepoMapBuilder(max_context_tokens=max(1, self.max_context_tokens // 3)).build(
+        repo_map_result = RepoMapBuilder(
+            max_context_tokens=max(1, self.max_context_tokens // 3)
+        ).build(
             source_files,
             symbol_index,
         )
@@ -76,13 +78,14 @@ class ContextBuilder:
             repo_snapshot=snapshot,
             repo_profile=repo_profile,
             repo_rules=resolved_rules,
-            repo_map=repo_map.text,
+            repo_map=repo_map_result.text,
             symbol_index=symbol_index,
             pr_history=[_coerce_pr(item) for item in pr_history],
             relevant_files=_select_relevant_files(source_files),
             previous_attempts=[_coerce_attempt(item) for item in previous_attempts],
             budget=context_budget,
             max_context_tokens=self.max_context_tokens,
+            repo_map_entries=repo_map_result.entries,
         )
 
     async def build_async(self, *args, **kwargs) -> ContributionContext:

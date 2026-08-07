@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 
 from contribai.analysis.repo_intel import RepoProfile
+from contribai.context.repo_map import RepoMapEntry
 from contribai.context.rules import ResolvedRepoRules
 from contribai.context.symbol_index import SymbolIndex
 from contribai.core.models import (
@@ -34,11 +35,13 @@ class ContributionContext:
     previous_attempts: list[AttemptSummary]
     budget: ExecutionBudget
     max_context_tokens: int = 30_000
+    repo_map_entries: tuple[RepoMapEntry, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "pr_history", list(self.pr_history))
         object.__setattr__(self, "relevant_files", dict(sorted(self.relevant_files.items())))
         object.__setattr__(self, "previous_attempts", list(self.previous_attempts))
+        object.__setattr__(self, "repo_map_entries", tuple(self.repo_map_entries))
 
     @property
     def coding_style(self) -> str:
@@ -54,6 +57,7 @@ class ContributionContext:
             "base_sha": self.repo_snapshot.base_sha,
             "rules": self.repo_rules.to_prompt_context(),
             "repo_map": self.repo_map,
+            "repo_map_entries": [entry.path for entry in self.repo_map_entries],
             "profile": profile,
             "files": self.relevant_files,
             "prs": [item.model_dump(mode="json") for item in self.pr_history],

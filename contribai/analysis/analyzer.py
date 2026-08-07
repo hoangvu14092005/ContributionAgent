@@ -30,6 +30,7 @@ from contribai.core.models import (
 from contribai.core.text_utils import strip_think_blocks
 from contribai.github.client import GitHubClient
 from contribai.llm.provider import LLMProvider
+from contribai.localization import ContributionTask, Localizer, LocalizationSet
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,30 @@ class CodeAnalyzer:
         self._compressor = ContextCompressor(
             max_context_tokens=getattr(config, "max_context_tokens", 30_000)
         )
+        self._localizer = Localizer()
+
+    async def localize(
+        self,
+        task: ContributionTask | Finding,
+        context: ContributionContext,
+    ) -> LocalizationSet:
+        """Return N-best repair locations for a finding or contribution task."""
+        if isinstance(task, Finding):
+            task = ContributionTask.from_finding(task)
+        return await self._localizer.locate(task, context)
+
+    async def localize_findings(
+        self,
+        findings: list[Finding],
+        context: ContributionContext,
+    ) -> dict[str, LocalizationSet]:
+        """Localize findings without collapsing them to one guessed file."""
+        localized: dict[str, LocalizationSet] = {}
+        for finding in findings:
+            localized[finding.id or f"{finding.file_path}:{finding.title}"] = await self.localize(
+                finding, context
+            )
+        return localized
 
     async def analyze(self, repo: Repository | ContributionContext) -> AnalysisResult:
         """Run full analysis on a repository.
@@ -264,7 +289,7 @@ class CodeAnalyzer:
         # Detect project profile and style
         profile = self._detect_project_profile(repo, tree, readme)
         style_guide = self._build_style_guide(relevant_files)
-        
+
         # Extract repository conventions (Phase 1 - Quick Win #1)
         conventions = RepoConventions.extract_from_files(repo, relevant_files)
         logger.info(
@@ -274,7 +299,7 @@ class CodeAnalyzer:
             conventions.quote_style,
             conventions.confidence * 100,
         )
-        
+
         coding_style = (
             f"PROJECT PROFILE:\n{profile}\n\n"
             f"STYLE GUIDE:\n{style_guide}\n\n"
@@ -569,9 +594,9 @@ class CodeAnalyzer:
 
         try:
             # Set task type for custom provider
-            if hasattr(self._llm, 'set_task'):
-                self._llm.set_task('analysis')
-            
+            if hasattr(self._llm, "set_task"):
+                self._llm.set_task("analysis")
+
             # Use higher max_tokens for analysis to avoid truncation (max 3 findings expected)
             response = await self._llm.complete(
                 prompt, system=system, temperature=0.2, max_tokens=4096
@@ -791,7 +816,7 @@ class CodeAnalyzer:
 
         try:
             # Try JSON first (more reliable for complex strings)
-            json_match = re.search(r'```json\s*\n(.*?)\n```', response, re.DOTALL)
+            json_match = re.search(r"```json\s*\n(.*?)\n```", response, re.DOTALL)
             if json_match:
                 try:
                     parsed = json.loads(json_match.group(1))
@@ -815,12 +840,12 @@ class CodeAnalyzer:
 
             # Clean up the YAML text
             yaml_text = yaml_text.strip()
-            
+
             # Skip if YAML appears truncated or malformed
             if not yaml_text or len(yaml_text) < 10:
                 logger.debug("YAML text too short or empty for %s", analyzer_name)
                 return []
-            
+
             # Check for obvious truncation markers
             if yaml_text.endswith("...") and not yaml_text.count("\n") > 2:
                 logger.debug("YAML appears truncated for %s", analyzer_name)
@@ -830,9 +855,13 @@ class CodeAnalyzer:
             try:
                 parsed = yaml.safe_load(yaml_text)
             except yaml.YAMLError as ye:
-                logger.warning("YAML parse error for %s: %s. Trying JSON fallback.", analyzer_name, str(ye)[:100])
+                logger.warning(
+                    "YAML parse error for %s: %s. Trying JSON fallback.",
+                    analyzer_name,
+                    str(ye)[:100],
+                )
                 # Try to extract JSON array/object from response
-                json_match = re.search(r'\[.*\]|\{.*\}', response, re.DOTALL)
+                json_match = re.search(r"\[.*\]|\{.*\}", response, re.DOTALL)
                 if json_match:
                     try:
                         parsed = json.loads(json_match.group(0))
@@ -841,7 +870,7 @@ class CodeAnalyzer:
                         return []
                 else:
                     # Last resort: try to extract JSON from the YAML text itself
-                    json_match = re.search(r'\[.*\]|\{.*\}', yaml_text, re.DOTALL)
+                    json_match = re.search(r"\[.*\]|\{.*\}", yaml_text, re.DOTALL)
                     if json_match:
                         try:
                             parsed = json.loads(json_match.group(0))
@@ -850,7 +879,7 @@ class CodeAnalyzer:
                             return []
                     else:
                         return []
-            
+
             if not parsed:
                 return []
 
@@ -868,7 +897,7 @@ class CodeAnalyzer:
     ) -> list[Finding]:
         """Create Finding objects from parsed items."""
         findings: list[Finding] = []
-        
+
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -892,7 +921,7 @@ class CodeAnalyzer:
                     suggestion=item.get("suggestion"),
                 )
             )
-        
+
         logger.info("Analyzer %s found %d issues", analyzer_name, len(findings))
         return findings
 
