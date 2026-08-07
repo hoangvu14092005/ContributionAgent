@@ -50,6 +50,7 @@ class RepoGuidelines:
     uses_conventional_commits: bool = False
     uses_angular_commits: bool = False
     requires_scope: bool = False
+    requires_issue_link: bool = False
     allowed_types: list[str] = field(default_factory=list)
 
     @property
@@ -94,6 +95,7 @@ async def fetch_repo_guidelines(
     # Parse conventions from content
     _parse_commit_format(guidelines)
     _parse_pr_template_sections(guidelines)
+    _parse_issue_link_requirement(guidelines)
 
     if guidelines.has_guidelines:
         logger.info(
@@ -166,6 +168,22 @@ def _parse_pr_template_sections(guidelines: RepoGuidelines) -> None:
     for section in comment_sections:
         if section.strip() not in guidelines.required_sections:
             guidelines.required_sections.append(section.strip())
+
+
+def _parse_issue_link_requirement(guidelines: RepoGuidelines) -> None:
+    """Detect only explicit requirements to open or link an issue before a PR."""
+    text = f"{guidelines.contributing_md}\n{guidelines.pr_template}".lower()
+    explicit_patterns = (
+        r"\b(?:must|shall|required\s+to)\s+(?:first\s+)?(?:open|create|file)\s+"
+        r"(?:an?\s+)?issue\s+before\s+(?:submitting|opening|creating|filing)\s+"
+        r"(?:an?\s+)?(?:pull\s+request|pr)\b",
+        r"\b(?:pull\s+requests?|prs?)\s+(?:must|shall|are\s+required\s+to)\s+"
+        r"(?:link(?:\s+to)?|reference|close|fix|resolve)\s+(?:an?\s+)?"
+        r"(?:existing\s+)?issue\b",
+        r"\b(?:an?\s+)?(?:existing\s+)?issue\s+(?:must|shall|is\s+required\s+to\s+be)\s+"
+        r"linked\s+to\s+(?:every|each|the|a)\s+(?:pull\s+request|pr)\b",
+    )
+    guidelines.requires_issue_link = any(re.search(pattern, text) for pattern in explicit_patterns)
 
 
 def adapt_pr_title(
@@ -362,7 +380,8 @@ def _default_pr_body(
         f"## Type of Change\n\n"
         f"- [x] Bug fix (non-breaking change which fixes an issue)\n"
         f"- [ ] New feature (non-breaking change which adds functionality)\n"
-        f"- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)\n"
+        "- [ ] Breaking change (fix or feature that would cause existing "
+        "functionality to not work as expected)\n"
         f"- [ ] Documentation update\n\n"
         f"## Testing\n\n"
         f"- [x] Code follows the style guidelines of this project\n"
@@ -376,9 +395,7 @@ def _default_pr_body(
 
 
 def _contribai_attribution() -> str:
-    return (
-        "Contributed by Hoàng Anh Vũ"
-    )
+    return "Contributed by Hoàng Anh Vũ"
 
 
 def extract_scope_from_path(file_path: str, guidelines: RepoGuidelines) -> str:

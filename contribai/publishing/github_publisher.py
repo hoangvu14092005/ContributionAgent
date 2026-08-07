@@ -241,7 +241,7 @@ class GitHubPublisher:
 
     @staticmethod
     def _requires_linked_issue(candidate: PublishCandidate) -> bool:
-        return bool(candidate.guidelines and candidate.guidelines.has_guidelines)
+        return bool(candidate.guidelines and candidate.guidelines.requires_issue_link)
 
     def _build_pr_body(self, candidate: PublishCandidate, issue_number: int | None) -> str:
         if candidate.guidelines and candidate.guidelines.has_guidelines:

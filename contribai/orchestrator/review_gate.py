@@ -7,6 +7,7 @@ pipeline to show the generated contribution for human approval.
 from __future__ import annotations
 
 import logging
+from enum import StrEnum
 
 from rich.console import Console
 from rich.panel import Panel
@@ -16,6 +17,13 @@ from rich.text import Text
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+
+class ReviewSideEffect(StrEnum):
+    """Side effects that must be visible to the reviewer."""
+
+    CREATE_ISSUE = "create_issue"
+    CREATE_PR = "create_pr"
 
 
 class ReviewDecision:
@@ -52,7 +60,14 @@ class HumanReviewer:
     def __init__(self, *, auto_approve: bool = False):
         self._auto_approve = auto_approve
 
-    async def review(self, contribution, finding, repo_name: str) -> ReviewDecision:
+    async def review(
+        self,
+        contribution,
+        finding,
+        repo_name: str,
+        *,
+        planned_side_effects: tuple[ReviewSideEffect, ...] = (),
+    ) -> ReviewDecision:
         """Present a contribution for human review.
 
         Args:
@@ -66,10 +81,22 @@ class HumanReviewer:
         if self._auto_approve:
             return ReviewDecision(ReviewDecision.APPROVE)
 
-        self._display_review(contribution, finding, repo_name)
+        self._display_review(
+            contribution,
+            finding,
+            repo_name,
+            planned_side_effects=planned_side_effects,
+        )
         return self._prompt_decision()
 
-    def _display_review(self, contribution, finding, repo_name: str) -> None:
+    def _display_review(
+        self,
+        contribution,
+        finding,
+        repo_name: str,
+        *,
+        planned_side_effects: tuple[ReviewSideEffect, ...] = (),
+    ) -> None:
         """Display the contribution details in Rich panels."""
         console.print()
         console.rule("[bold cyan]🔍 Human Review Required[/bold cyan]")
@@ -94,6 +121,16 @@ class HumanReviewer:
         info_table.add_row("File", finding.file_path or "N/A")
         info_table.add_row("Commit", contribution.commit_message)
         console.print(Panel(info_table, title="[bold]Contribution Details", border_style="blue"))
+
+        if planned_side_effects:
+            side_effects = "\n".join(f"- {effect.value}" for effect in planned_side_effects)
+            console.print(
+                Panel(
+                    side_effects,
+                    title="[bold yellow]Planned GitHub side effects",
+                    border_style="yellow",
+                )
+            )
 
         # Description
         console.print(
@@ -174,3 +211,40 @@ class HumanReviewer:
                 return ReviewDecision(ReviewDecision.SKIP)
 
             console.print("[dim]Please enter y, n, or s[/dim]")
+
+
+class ReviewGate:
+    """Central review boundary shared by code-scan and issue-solving paths."""
+
+    def __init__(self, reviewer: HumanReviewer, *, explicit_human_review: bool) -> None:
+        self._reviewer = reviewer
+        self._explicit_human_review = explicit_human_review
+
+    async def review(
+        self,
+        contribution,
+        finding,
+        repo_name: str,
+        *,
+        planned_side_effects: tuple[ReviewSideEffect, ...] = (),
+    ) -> ReviewDecision:
+        """Require explicit human approval before creating a new upstream issue."""
+        if (
+            ReviewSideEffect.CREATE_ISSUE in planned_side_effects
+            and not self._explicit_human_review
+        ):
+            logger.warning(
+                "Skipping %s: planned issue creation requires explicit human review",
+                repo_name,
+            )
+            return ReviewDecision(
+                ReviewDecision.SKIP,
+                "planned issue creation requires explicit human review",
+            )
+
+        return await self._reviewer.review(
+            contribution,
+            finding,
+            repo_name,
+            planned_side_effects=planned_side_effects,
+        )

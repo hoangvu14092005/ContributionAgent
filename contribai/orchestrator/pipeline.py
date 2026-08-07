@@ -30,7 +30,7 @@ from contribai.github.guidelines import fetch_repo_guidelines
 from contribai.issues.solver import IssueSolver
 from contribai.llm.provider import create_llm_provider
 from contribai.orchestrator.memory import Memory
-from contribai.orchestrator.review_gate import HumanReviewer
+from contribai.orchestrator.review_gate import HumanReviewer, ReviewGate, ReviewSideEffect
 from contribai.pr.manager import PRManager
 from contribai.tools.protocol import create_default_tools
 
@@ -138,6 +138,7 @@ class ContribPipeline:
         self._agent_registry = None
         self._tool_registry = None
         self._reviewer: HumanReviewer | None = None
+        self._review_gate: ReviewGate | None = None
         self._event_bus: EventBus = EventBus()
         self._repo_intel: RepoIntelligence | None = None
 
@@ -220,6 +221,10 @@ class ContribPipeline:
         else:
             self._reviewer = HumanReviewer(auto_approve=True)
             logger.debug("Human review gate: disabled (auto-approve)")
+        self._review_gate = ReviewGate(
+            self._reviewer,
+            explicit_human_review=self.config.pipeline.human_review,
+        )
 
         # Event bus + file logger for observability
         from pathlib import Path
@@ -692,6 +697,44 @@ class ContribPipeline:
         finally:
             await self._cleanup()
 
+    async def _review_and_publish(
+        self,
+        contribution,
+        finding,
+        repo: Repository,
+        guidelines,
+        *,
+        closes_issue: int | None = None,
+    ) -> PRResult | None:
+        """Apply the single review boundary before the legacy publish seam.
+
+        ``PRManager.create_pr`` remains fail-closed in production until a later
+        control-plane task supplies a permit-bearing ``GitHubPublisher`` command.
+        """
+        planned_side_effects = [ReviewSideEffect.CREATE_PR]
+        if closes_issue is None and guidelines.requires_issue_link:
+            planned_side_effects.insert(0, ReviewSideEffect.CREATE_ISSUE)
+
+        decision = await self._review_gate.review(
+            contribution,
+            finding,
+            repo.full_name,
+            planned_side_effects=tuple(planned_side_effects),
+        )
+        if decision.rejected:
+            logger.info("Human rejected: %s", contribution.title)
+            return None
+        if decision.skipped:
+            logger.info("Human skipped: %s", contribution.title)
+            return None
+
+        return await self._pr_manager.create_pr(
+            contribution,
+            repo,
+            guidelines=guidelines,
+            closes_issue=closes_issue,
+        )
+
     # ── Internal ───────────────────────────────────────────────────────────
 
     async def _process_repo(
@@ -934,7 +977,7 @@ class ContribPipeline:
             )
             for gpr in github_prs:
                 past_titles_lower.add(gpr.get("title", "").lower())
-                # Extract file paths from branch name (bot branches use patterns like fix/, docs/, feat/)
+                # Extract file paths from bot branch names such as fix/, docs/, and feat/.
                 head = gpr.get("head", {})
                 branch_label = head.get("label", "")
                 # Check if branch matches bot patterns
@@ -1040,21 +1083,17 @@ class ContribPipeline:
                 logger.info("🏃 [DRY RUN] Would create PR: %s", contribution.title)
                 continue
 
-            # Human review gate
-            decision = await self._reviewer.review(contribution, finding, repo.full_name)
-            if decision.rejected:
-                logger.info("❌ Human rejected: %s", contribution.title)
-                continue
-            if decision.skipped:
-                logger.info("⏭️ Human skipped: %s", contribution.title)
-                continue
-
             # Create PR
             try:
                 logger.info("📤 Creating PR...")
-                pr_result = await self._pr_manager.create_pr(
-                    contribution, repo, guidelines=guidelines
+                pr_result = await self._review_and_publish(
+                    contribution,
+                    finding,
+                    repo,
+                    guidelines,
                 )
+                if pr_result is None:
+                    continue
                 result.prs_created += 1
                 result.prs.append(pr_result)
                 await self._event_bus.emit(
@@ -1255,12 +1294,15 @@ class ContribPipeline:
             # Create PR with "Closes #N" in body
             try:
                 logger.info("📤 Creating PR for issue #%d...", issue.number)
-                pr_result = await self._pr_manager.create_pr(
+                pr_result = await self._review_and_publish(
                     contribution,
+                    primary,
                     repo,
-                    guidelines=guidelines,
+                    guidelines,
                     closes_issue=issue.number,
                 )
+                if pr_result is None:
+                    continue
                 result.prs_created += 1
                 result.prs.append(pr_result)
 
@@ -1408,9 +1450,9 @@ class ContribPipeline:
 
             try:
                 # Set task type for custom provider
-                if hasattr(self._llm, 'set_task'):
-                    self._llm.set_task('validation')
-                
+                if hasattr(self._llm, "set_task"):
+                    self._llm.set_task("validation")
+
                 response = await self._llm.complete(
                     prompt,
                     system=(
@@ -1567,35 +1609,14 @@ class ContribPipeline:
         *,
         reason: str = "PR was closed",
     ) -> None:
-        """Report linked issues that require a permit-bearing close command.
-
-        Fetches the PR body, extracts linked issue numbers (Closes/Fixes #N),
-        but performs no write because this legacy path has no PublishPermit.
-        """
-        import re
-
-        try:
-            pr_data = await self._github._get(f"/repos/{repo.owner}/{repo.name}/pulls/{pr_number}")
-            body = pr_data.get("body", "") or ""
-
-            # Match GitHub linking keywords: Closes #123, Fixes #123, Resolves #123
-            issue_numbers = re.findall(
-                r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
-                body,
-                re.IGNORECASE,
-            )
-
-            for issue_num in set(issue_numbers):
-                logger.warning(
-                    "Linked issue #%s on %s was not closed after PR #%d (%s): "
-                    "a publisher permit is required",
-                    issue_num,
-                    repo.full_name,
-                    pr_number,
-                    reason,
-                )
-        except Exception:
-            logger.debug("Could not fetch PR #%d body for issue cleanup", pr_number)
+        """Deny legacy issue closing until Task 5 can prove persisted provenance."""
+        logger.warning(
+            "No linked issue was closed for %s PR #%d (%s): persisted "
+            "created_by_contribai and auto_close provenance is unavailable",
+            repo.full_name,
+            pr_number,
+            reason,
+        )
 
     async def _check_ci_and_close_if_failed(
         self,

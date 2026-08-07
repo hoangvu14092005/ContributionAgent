@@ -65,9 +65,13 @@ class PRManager:
             "to not work as expected)"
         )
 
-        return f"""## Description
+        return f"""## Problem
 
 {finding.description}
+
+## Solution
+
+{contribution.description}
 
 ## Changes
 
