@@ -1,8 +1,12 @@
-"""Optional OpenHands SDK driver constrained by the outer workspace."""
+"""Optional OpenHands SDK driver constrained by the outer workspace.
+
+Third-party SDK code is never auto-imported into the control-plane process.
+Deployments must inject a reviewed runner/factory explicitly; otherwise this
+adapter fails closed instead of inheriting host filesystem/network credentials.
+"""
 
 from __future__ import annotations
 
-import importlib
 import inspect
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -18,7 +22,7 @@ from contribai.execution.workspaces.base import Workspace
 
 
 class OpenHandsSDKDriver(ExternalEngineDriver):
-    """Embed OpenHands while forcing its workspace implementation to local."""
+    """Use only an explicitly injected OpenHands binding."""
 
     engine_name = "openhands-sdk"
     engine_version = "openhands-sdk@optional"
@@ -61,10 +65,10 @@ class OpenHandsSDKDriver(ExternalEngineDriver):
                 timeout_sec=self.timeout_sec,
             )
 
-        factory = self._agent_factory or self._discover_agent_factory()
+        factory = self._agent_factory or self._factory_from_explicit_module()
         if factory is None:
             raise AdapterUnavailableError(
-                "OpenHands SDK is unavailable or has no safe LocalWorkspace factory"
+                "OpenHands SDK requires an explicitly injected reviewed runner or factory"
             )
         agent = await invoke_callback(
             factory,
@@ -73,11 +77,11 @@ class OpenHandsSDKDriver(ExternalEngineDriver):
             workspace=workspace,
             workspace_path=workspace.path,
             prompt=prompt,
-            workspace_backend="local",
+            workspace_backend="outer",
             sandbox_mode="outer",
             use_docker=False,
         )
-        if isinstance(agent, (Mapping,)):
+        if isinstance(agent, Mapping):
             return agent
         if agent is None:
             return None
@@ -109,13 +113,11 @@ class OpenHandsSDKDriver(ExternalEngineDriver):
             f"Task: {request.task.query_text}\n\n{request.context.to_prompt()}"
         )
 
-    def _discover_agent_factory(self) -> Callable[..., object] | None:
+    def _factory_from_explicit_module(self) -> Callable[..., object] | None:
+        """Build a factory only from a module object explicitly supplied by deployment code."""
         module = self._sdk_module
         if module is None:
-            try:
-                module = importlib.import_module("openhands.sdk")
-            except ImportError:
-                return None
+            return None
         local_workspace = getattr(module, "LocalWorkspace", None)
         agent = getattr(module, "Agent", None) or getattr(module, "CodeActAgent", None)
         if local_workspace is None or agent is None:
