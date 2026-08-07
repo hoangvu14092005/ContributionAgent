@@ -145,3 +145,61 @@ capability_policy:
 
     with pytest.raises(ConfigError):
         load_config(config_file)
+
+
+@pytest.mark.parametrize(
+    "capability",
+    [
+        Capability.GITHUB_COMMENT,
+        Capability.GITHUB_PUSH,
+        Capability.GITHUB_CREATE_ISSUE,
+        Capability.GITHUB_CREATE_PR,
+        Capability.GITHUB_CLOSE_PR,
+    ],
+)
+def test_non_publisher_cannot_grant_github_write_capability_at_startup(
+    tmp_path,
+    capability: Capability,
+) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"""
+capability_policy:
+  rules:
+    - actor: analysis_worker
+      capability: {capability.value}
+      resource: repositories/acme/widgets
+      decision: allow
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(config_file)
+
+
+def test_non_publisher_can_receive_non_write_capability() -> None:
+    engine = PolicyEngine(
+        CapabilityPolicy(
+            rules=[
+                PolicyRule(
+                    actor="analysis_worker",
+                    capability=Capability.GITHUB_READ,
+                    resource="repositories/acme/widgets",
+                    decision=PolicyDecision.ALLOW,
+                )
+            ]
+        )
+    )
+
+    assert (
+        engine.evaluate(
+            CapabilityRequest(
+                actor="analysis_worker",
+                capability=Capability.GITHUB_READ,
+                resource="repositories/acme/widgets",
+                work_id="work-123",
+            )
+        )
+        is PolicyDecision.ALLOW
+    )

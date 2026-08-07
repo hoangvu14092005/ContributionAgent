@@ -5,9 +5,19 @@ from __future__ import annotations
 from enum import StrEnum
 from fnmatch import fnmatchcase
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from contribai.publishing.capability import Capability, CapabilityRequest
+from contribai.publishing.capability import GITHUB_PUBLISHER_ACTOR, Capability, CapabilityRequest
+
+_GITHUB_WRITE_CAPABILITIES = frozenset(
+    {
+        Capability.GITHUB_COMMENT,
+        Capability.GITHUB_PUSH,
+        Capability.GITHUB_CREATE_ISSUE,
+        Capability.GITHUB_CREATE_PR,
+        Capability.GITHUB_CLOSE_PR,
+    }
+)
 
 
 class PolicyDecision(StrEnum):
@@ -27,6 +37,13 @@ class PolicyRule(BaseModel):
     capability: Capability
     resource: str
     decision: PolicyDecision
+
+    @model_validator(mode="after")
+    def validate_github_write_actor(self) -> PolicyRule:
+        """Reserve GitHub write capabilities for the publisher authority."""
+        if self.capability in _GITHUB_WRITE_CAPABILITIES and self.actor != GITHUB_PUBLISHER_ACTOR:
+            raise ValueError(f"{self.capability} rules require actor {GITHUB_PUBLISHER_ACTOR!r}")
+        return self
 
 
 class CapabilityPolicy(BaseModel):

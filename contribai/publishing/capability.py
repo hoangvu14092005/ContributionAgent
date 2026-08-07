@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+GITHUB_PUBLISHER_ACTOR = "github_publisher"
+
 
 class Capability(StrEnum):
     """Operations that may be authorized by the control plane."""
