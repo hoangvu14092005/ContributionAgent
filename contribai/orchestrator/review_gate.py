@@ -7,7 +7,6 @@ pipeline to show the generated contribution for human approval.
 from __future__ import annotations
 
 import logging
-from enum import StrEnum
 
 from rich.console import Console
 from rich.panel import Panel
@@ -15,15 +14,10 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from contribai.publishing.permit import PublishSideEffect
+
 logger = logging.getLogger(__name__)
 console = Console()
-
-
-class ReviewSideEffect(StrEnum):
-    """Side effects that must be visible to the reviewer."""
-
-    CREATE_ISSUE = "create_issue"
-    CREATE_PR = "create_pr"
 
 
 class ReviewDecision:
@@ -33,9 +27,18 @@ class ReviewDecision:
     REJECT = "reject"
     SKIP = "skip"
 
-    def __init__(self, action: str, reason: str = ""):
+    def __init__(
+        self,
+        action: str,
+        reason: str = "",
+        *,
+        approved_side_effects: frozenset[PublishSideEffect] = frozenset(),
+    ):
         self.action = action
         self.reason = reason
+        self.approved_side_effects = (
+            approved_side_effects if action == self.APPROVE else frozenset()
+        )
 
     @property
     def approved(self) -> bool:
@@ -66,7 +69,7 @@ class HumanReviewer:
         finding,
         repo_name: str,
         *,
-        planned_side_effects: tuple[ReviewSideEffect, ...] = (),
+        planned_side_effects: tuple[PublishSideEffect, ...] = (),
     ) -> ReviewDecision:
         """Present a contribution for human review.
 
@@ -95,7 +98,7 @@ class HumanReviewer:
         finding,
         repo_name: str,
         *,
-        planned_side_effects: tuple[ReviewSideEffect, ...] = (),
+        planned_side_effects: tuple[PublishSideEffect, ...] = (),
     ) -> None:
         """Display the contribution details in Rich panels."""
         console.print()
@@ -226,11 +229,11 @@ class ReviewGate:
         finding,
         repo_name: str,
         *,
-        planned_side_effects: tuple[ReviewSideEffect, ...] = (),
+        planned_side_effects: tuple[PublishSideEffect, ...] = (),
     ) -> ReviewDecision:
         """Require explicit human approval before creating a new upstream issue."""
         if (
-            ReviewSideEffect.CREATE_ISSUE in planned_side_effects
+            PublishSideEffect.CREATE_ISSUE in planned_side_effects
             and not self._explicit_human_review
         ):
             logger.warning(
@@ -242,9 +245,16 @@ class ReviewGate:
                 "planned issue creation requires explicit human review",
             )
 
-        return await self._reviewer.review(
+        decision = await self._reviewer.review(
             contribution,
             finding,
             repo_name,
             planned_side_effects=planned_side_effects,
+        )
+        if decision.approved is not True:
+            return ReviewDecision(decision.action, decision.reason)
+        return ReviewDecision(
+            ReviewDecision.APPROVE,
+            decision.reason,
+            approved_side_effects=frozenset(planned_side_effects),
         )

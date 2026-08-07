@@ -17,7 +17,12 @@ from contribai.publishing.idempotency import (
     IdempotencyStore,
     InMemoryIdempotencyStore,
 )
-from contribai.publishing.permit import PublishCandidate, PublishPermit, PublishPermitError
+from contribai.publishing.permit import (
+    PublishCandidate,
+    PublishPermit,
+    PublishPermitError,
+    PublishSideEffect,
+)
 from contribai.publishing.policy import PolicyDecision, PolicyEngine
 
 logger = logging.getLogger(__name__)
@@ -85,6 +90,24 @@ class GitHubPublisher:
         if permit.patch_sha256 != candidate.patch_sha256:
             raise PublishPermitError(
                 "Publish permit patch hash does not match candidate patch hash"
+            )
+
+        if not isinstance(permit.approved_side_effects, frozenset):
+            raise PublishPermitError("Publish permit approved side effects must be a frozenset")
+        if any(
+            not isinstance(side_effect, PublishSideEffect)
+            for side_effect in permit.approved_side_effects
+        ):
+            raise PublishPermitError("Publish permit contains an unknown approved side effect")
+
+        required_side_effects = {PublishSideEffect.CREATE_PR}
+        if candidate.closes_issue is None and self._requires_linked_issue(candidate):
+            required_side_effects.add(PublishSideEffect.CREATE_ISSUE)
+        missing_side_effects = required_side_effects - permit.approved_side_effects
+        if missing_side_effects:
+            missing = ", ".join(sorted(side_effect.value for side_effect in missing_side_effects))
+            raise PublishPermitError(
+                f"Publish permit review did not approve required side effects: {missing}"
             )
 
     def _authorize_publish(self, permit: PublishPermit, candidate: PublishCandidate) -> None:

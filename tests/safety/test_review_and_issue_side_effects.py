@@ -2,24 +2,29 @@
 
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from contribai.core.models import (
+    AnalysisResult,
     Contribution,
     ContributionType,
     FileChange,
     Finding,
+    Issue,
+    PRResult,
+    PRStatus,
     Repository,
     Severity,
 )
 from contribai.github.guidelines import RepoGuidelines, fetch_repo_guidelines
+from contribai.orchestrator import pipeline as pipeline_module
 from contribai.orchestrator import review_gate as review_gate_module
 from contribai.orchestrator.pipeline import ContribPipeline
 from contribai.orchestrator.review_gate import HumanReviewer, ReviewDecision
+from contribai.publishing import permit as permit_module
 from contribai.publishing.github_publisher import GitHubPublisher
 
 
@@ -74,10 +79,13 @@ def _pipeline_with_review(action: str) -> tuple[ContribPipeline, AsyncMock, Asyn
     return pipeline, review_gate, publish_seam
 
 
-@pytest.mark.parametrize("action", [ReviewDecision.REJECT, ReviewDecision.SKIP])
+@pytest.mark.parametrize(
+    "action",
+    [ReviewDecision.REJECT, ReviewDecision.SKIP, "unknown"],
+)
 @pytest.mark.parametrize("source_issue_number", [None, 41], ids=["code-scan", "issue-solving"])
 @pytest.mark.asyncio
-async def test_reject_and_skip_make_zero_publish_attempts_for_both_paths(
+async def test_non_approval_makes_zero_publish_attempts_for_shared_seam(
     action: str,
     source_issue_number: int | None,
     repo: Repository,
@@ -127,12 +135,6 @@ async def test_approve_preserves_publish_flow_for_both_paths(
     assert publish_seam.create_pr.await_args.kwargs.get("closes_issue") == source_issue_number
 
 
-def test_code_scan_and_issue_solver_call_the_same_review_boundary() -> None:
-    for path in (ContribPipeline._process_repo, ContribPipeline._process_repo_issues):
-        source = inspect.getsource(path)
-        assert "self._review_and_publish(" in source
-
-
 @pytest.mark.asyncio
 async def test_new_issue_side_effect_requires_explicit_human_review(
     repo: Repository,
@@ -140,9 +142,11 @@ async def test_new_issue_side_effect_requires_explicit_human_review(
     contribution: Contribution,
 ) -> None:
     gate_type = getattr(review_gate_module, "ReviewGate", None)
-    side_effect_type = getattr(review_gate_module, "ReviewSideEffect", None)
+    side_effect_type = getattr(permit_module, "PublishSideEffect", None)
     assert gate_type is not None
     assert side_effect_type is not None
+    assert getattr(review_gate_module, "PublishSideEffect", None) is side_effect_type
+    assert not hasattr(review_gate_module, "ReviewSideEffect")
 
     reviewer = AsyncMock(spec=HumanReviewer)
     reviewer.review.return_value = ReviewDecision(ReviewDecision.APPROVE)
@@ -166,9 +170,10 @@ async def test_explicit_reviewer_receives_planned_issue_side_effect(
     contribution: Contribution,
 ) -> None:
     gate_type = getattr(review_gate_module, "ReviewGate", None)
-    side_effect_type = getattr(review_gate_module, "ReviewSideEffect", None)
+    side_effect_type = getattr(permit_module, "PublishSideEffect", None)
     assert gate_type is not None
     assert side_effect_type is not None
+    assert getattr(review_gate_module, "PublishSideEffect", None) is side_effect_type
 
     reviewer = AsyncMock(spec=HumanReviewer)
     reviewer.review.return_value = ReviewDecision(ReviewDecision.APPROVE)
@@ -183,6 +188,7 @@ async def test_explicit_reviewer_receives_planned_issue_side_effect(
     )
 
     assert decision.approved
+    assert decision.approved_side_effects == frozenset(planned)
     reviewer.review.assert_awaited_once_with(
         contribution,
         finding,
@@ -232,6 +238,108 @@ async def test_only_explicit_issue_link_requirements_are_parsed(instruction: str
     assert guidelines.requires_issue_link is True
     candidate = SimpleNamespace(guidelines=guidelines)
     assert GitHubPublisher._requires_linked_issue(candidate) is True
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "Not all PRs must link to an issue.",
+        "PRs must link to an issue only when applicable.",
+        "If applicable, link an issue.",
+    ],
+)
+@pytest.mark.asyncio
+async def test_conditional_or_negated_issue_guidance_is_not_a_requirement(
+    instruction: str,
+) -> None:
+    guidelines = await _fetch_guidelines(contributing=instruction)
+
+    assert guidelines.requires_issue_link is False
+
+
+def _runtime_pipeline(
+    repo: Repository,
+    finding: Finding,
+    contribution: Contribution,
+    action: str,
+) -> ContribPipeline:
+    config = MagicMock()
+    config.pipeline.max_findings_per_repo = 3
+    pipeline = ContribPipeline(config)
+    pipeline._memory = AsyncMock()
+    pipeline._memory.get_context.return_value = None
+    pipeline._memory.get_repo_prs.return_value = []
+    pipeline._github = AsyncMock()
+    pipeline._github.get_file_tree.return_value = []
+    pipeline._github.get_file_content.return_value = "def service():\n    return True\n"
+    pipeline._github.list_pull_requests.return_value = []
+    pipeline._repo_intel = AsyncMock()
+    pipeline._repo_intel.profile.return_value = None
+    pipeline._analyzer = AsyncMock()
+    pipeline._analyzer.analyze.return_value = AnalysisResult(repo=repo, findings=[finding])
+    pipeline._generator = AsyncMock()
+    pipeline._generator.generate.return_value = contribution
+    pipeline._event_bus = AsyncMock()
+    pipeline._review_gate = AsyncMock()
+    pipeline._review_gate.review.return_value = ReviewDecision(action)
+    pipeline._pr_manager = AsyncMock()
+    pipeline._pr_manager.create_pr.return_value = PRResult(
+        repo=repo,
+        contribution=contribution,
+        pr_number=17,
+        pr_url="https://github.com/acme/widgets/pull/17",
+        status=PRStatus.OPEN,
+        branch_name="fix/dead-branch",
+        fork_full_name="bot/widgets",
+    )
+    pipeline._check_ai_policy = AsyncMock(return_value=False)
+    pipeline._check_pr_permissions = AsyncMock(return_value=False)
+    pipeline._validate_findings = AsyncMock(return_value=[finding])
+    pipeline._check_ci_and_close_if_failed = AsyncMock()
+    pipeline._identify_key_files = MagicMock(return_value=[])
+    pipeline._review_and_publish = AsyncMock(wraps=pipeline._review_and_publish)
+    return pipeline
+
+
+@pytest.mark.parametrize("path", ["code-scan", "issue-solving"])
+@pytest.mark.parametrize(
+    "action,expected_publish_count",
+    [
+        (ReviewDecision.REJECT, 0),
+        (ReviewDecision.SKIP, 0),
+        ("unknown", 0),
+        (ReviewDecision.APPROVE, 1),
+    ],
+)
+@pytest.mark.asyncio
+async def test_real_pipeline_paths_share_review_gate_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    action: str,
+    expected_publish_count: int,
+    repo: Repository,
+    finding: Finding,
+    contribution: Contribution,
+) -> None:
+    pipeline = _runtime_pipeline(repo, finding, contribution, action)
+    monkeypatch.setattr(
+        pipeline_module,
+        "fetch_repo_guidelines",
+        AsyncMock(return_value=RepoGuidelines()),
+    )
+
+    if path == "code-scan":
+        result = await pipeline._process_repo(repo, dry_run=False, max_prs=1)
+    else:
+        solver = AsyncMock()
+        solver.fetch_solvable_issues.return_value = [Issue(number=41, title="Fix dead branch")]
+        solver.solve_issue_deep.return_value = [finding]
+        monkeypatch.setattr(pipeline_module, "IssueSolver", lambda **kwargs: solver)
+        result = await pipeline._process_repo_issues(repo, dry_run=False, max_prs=1)
+
+    pipeline._review_and_publish.assert_awaited_once()
+    assert pipeline._pr_manager.create_pr.await_count == expected_publish_count
+    assert result.prs_created == expected_publish_count
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,8 @@ from contribai.core.models import (
     Severity,
 )
 from contribai.github.client import GitHubClient, GitHubWriteAuthority
+from contribai.github.guidelines import RepoGuidelines
+from contribai.publishing import permit as permit_module
 from contribai.publishing.capability import GITHUB_PUBLISHER_ACTOR, Capability
 from contribai.publishing.github_publisher import GitHubPublisher, PublishPolicyError
 from contribai.publishing.idempotency import InMemoryIdempotencyStore
@@ -28,6 +30,7 @@ from contribai.publishing.permit import (
     ContributionPublishCandidate,
     PublishPermit,
     PublishPermitError,
+    PublishSideEffect,
 )
 from contribai.publishing.policy import CapabilityPolicy, PolicyDecision, PolicyEngine, PolicyRule
 
@@ -93,6 +96,7 @@ def permit(candidate: ContributionPublishCandidate) -> PublishPermit:
         patch_sha256=candidate.patch_sha256,
         verification_id="verification-123",
         review_id="review-123",
+        approved_side_effects=frozenset({PublishSideEffect.CREATE_PR}),
         quota_reservation_id="quota-123",
         expires_at=NOW + timedelta(minutes=5),
     )
@@ -592,3 +596,96 @@ async def test_cancelling_one_duplicate_waiter_does_not_cancel_shared_publish(
     assert github.create_branch.await_count == 1
     assert github.create_or_update_file.await_count == 1
     assert github.create_pull_request.await_count == 1
+
+
+def _permit_with_side_effects(
+    permit: PublishPermit,
+    *side_effect_names: str,
+) -> PublishPermit:
+    side_effect_type = getattr(permit_module, "PublishSideEffect", None)
+    assert side_effect_type is not None, "publishing layer must define canonical side effects"
+    return replace(
+        permit,
+        approved_side_effects=frozenset(
+            getattr(side_effect_type, side_effect_name) for side_effect_name in side_effect_names
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_requires_explicit_create_pr_review_approval_before_reads(
+    github: AsyncMock,
+    permit: PublishPermit,
+    candidate: ContributionPublishCandidate,
+) -> None:
+    permit_without_pr_approval = _permit_with_side_effects(permit)
+
+    with pytest.raises(PublishPermitError, match="create_pr"):
+        await make_publisher(github).publish(permit_without_pr_approval, candidate)
+
+    github.get_authenticated_user.assert_not_awaited()
+    github.fork_repository.assert_not_awaited()
+    github.create_pull_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generic_review_id_cannot_approve_unreviewed_issue_creation(
+    github: AsyncMock,
+    permit: PublishPermit,
+    contribution: Contribution,
+    target_repo: Repository,
+) -> None:
+    candidate = ContributionPublishCandidate(
+        contribution,
+        target_repo,
+        BASE_SHA,
+        guidelines=RepoGuidelines(requires_issue_link=True),
+    )
+    pr_only_permit = _permit_with_side_effects(permit, "CREATE_PR")
+    publisher = make_publisher(
+        github,
+        policy_engine(
+            Capability.GITHUB_PUSH,
+            Capability.GITHUB_CREATE_PR,
+            Capability.GITHUB_CREATE_ISSUE,
+        ),
+    )
+
+    with pytest.raises(PublishPermitError, match="create_issue"):
+        await publisher.publish(pr_only_permit, candidate)
+
+    github.get_authenticated_user.assert_not_awaited()
+    github.fork_repository.assert_not_awaited()
+    github.create_issue.assert_not_awaited()
+    github.create_pull_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exact_issue_and_pr_review_approvals_allow_issue_then_pr(
+    github: AsyncMock,
+    permit: PublishPermit,
+    contribution: Contribution,
+    target_repo: Repository,
+) -> None:
+    candidate = ContributionPublishCandidate(
+        contribution,
+        target_repo,
+        BASE_SHA,
+        guidelines=RepoGuidelines(requires_issue_link=True),
+    )
+    approved_permit = _permit_with_side_effects(permit, "CREATE_PR", "CREATE_ISSUE")
+    github.create_issue.return_value = {"number": 41}
+    publisher = make_publisher(
+        github,
+        policy_engine(
+            Capability.GITHUB_PUSH,
+            Capability.GITHUB_CREATE_PR,
+            Capability.GITHUB_CREATE_ISSUE,
+        ),
+    )
+
+    result = await publisher.publish(approved_permit, candidate)
+
+    assert result.pr_number == 73
+    github.create_issue.assert_awaited_once()
+    github.create_pull_request.assert_awaited_once()

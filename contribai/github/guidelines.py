@@ -183,7 +183,18 @@ def _parse_issue_link_requirement(guidelines: RepoGuidelines) -> None:
         r"\b(?:an?\s+)?(?:existing\s+)?issue\s+(?:must|shall|is\s+required\s+to\s+be)\s+"
         r"linked\s+to\s+(?:every|each|the|a)\s+(?:pull\s+request|pr)\b",
     )
-    guidelines.requires_issue_link = any(re.search(pattern, text) for pattern in explicit_patterns)
+    conditional_or_negated_patterns = (
+        r"\bnot\s+(?:all|every|each)\s+(?:pull\s+requests?|prs?)\b",
+        r"\bonly\s+(?:if|when)\b",
+        r"\b(?:if|when)\s+(?:it\s+is\s+)?applicable\b",
+    )
+    clauses = re.split(r"(?:[.!?]\s*|\n+)", text)
+    guidelines.requires_issue_link = any(
+        any(re.search(pattern, clause) for pattern in explicit_patterns)
+        and not any(re.search(pattern, clause) for pattern in conditional_or_negated_patterns)
+        for clause in clauses
+        if clause.strip()
+    )
 
 
 def adapt_pr_title(

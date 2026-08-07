@@ -30,8 +30,9 @@ from contribai.github.guidelines import fetch_repo_guidelines
 from contribai.issues.solver import IssueSolver
 from contribai.llm.provider import create_llm_provider
 from contribai.orchestrator.memory import Memory
-from contribai.orchestrator.review_gate import HumanReviewer, ReviewGate, ReviewSideEffect
+from contribai.orchestrator.review_gate import HumanReviewer, ReviewGate
 from contribai.pr.manager import PRManager
+from contribai.publishing.permit import PublishSideEffect
 from contribai.tools.protocol import create_default_tools
 
 logger = logging.getLogger(__name__)
@@ -711,9 +712,9 @@ class ContribPipeline:
         ``PRManager.create_pr`` remains fail-closed in production until a later
         control-plane task supplies a permit-bearing ``GitHubPublisher`` command.
         """
-        planned_side_effects = [ReviewSideEffect.CREATE_PR]
+        planned_side_effects = [PublishSideEffect.CREATE_PR]
         if closes_issue is None and guidelines.requires_issue_link:
-            planned_side_effects.insert(0, ReviewSideEffect.CREATE_ISSUE)
+            planned_side_effects.insert(0, PublishSideEffect.CREATE_ISSUE)
 
         decision = await self._review_gate.review(
             contribution,
@@ -721,11 +722,12 @@ class ContribPipeline:
             repo.full_name,
             planned_side_effects=tuple(planned_side_effects),
         )
-        if decision.rejected:
-            logger.info("Human rejected: %s", contribution.title)
-            return None
-        if decision.skipped:
-            logger.info("Human skipped: %s", contribution.title)
+        if decision.approved is not True:
+            logger.info(
+                "Review did not approve %s (decision=%s)",
+                contribution.title,
+                decision.action,
+            )
             return None
 
         return await self._pr_manager.create_pr(

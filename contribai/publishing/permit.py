@@ -7,6 +7,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Protocol
 
 from contribai.core.models import Contribution, Repository
@@ -20,6 +21,13 @@ class PublishCandidateError(ValueError):
     """Raised when a candidate cannot be canonically bound for publishing."""
 
 
+class PublishSideEffect(StrEnum):
+    """Canonical reviewed side effects that a publish permit may authorize."""
+
+    CREATE_PR = "create_pr"
+    CREATE_ISSUE = "create_issue"
+
+
 @dataclass(frozen=True)
 class PublishPermit:
     """Proof bindings required before any GitHub publish side effect."""
@@ -30,6 +38,7 @@ class PublishPermit:
     patch_sha256: str
     verification_id: str
     review_id: str
+    approved_side_effects: frozenset[PublishSideEffect]
     quota_reservation_id: str
     expires_at: datetime
 
