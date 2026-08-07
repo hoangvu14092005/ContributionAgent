@@ -172,6 +172,23 @@ async def test_docker_attempt_is_self_contained_git_clone(
 
 
 @pytest.mark.asyncio
+async def test_workspace_diff_detects_binary_changes(
+    git_repo: tuple[Path, str],
+) -> None:
+    repo, base_sha = git_repo
+    manager = WorkspaceManager(repo)
+    workspace = await manager.create_attempt("work-binary", base_sha, "attempt-1", ResourcePolicy())
+    try:
+        binary_path = workspace.path / "asset.bin"
+        binary_path.write_bytes(b"\x00\x01\x02\xff")
+        diff = await workspace.diff_from_base()
+        assert "asset.bin" in diff.changed_files
+        assert "asset.bin" in diff.binary_files
+    finally:
+        await manager.destroy_attempt(workspace.snapshot_id)
+
+
+@pytest.mark.asyncio
 async def test_unavailable_docker_is_not_a_success(git_repo: tuple[Path, str]) -> None:
     repo, base_sha = git_repo
     workspace = DockerWorkspace(
