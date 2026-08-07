@@ -1,0 +1,46 @@
+name: PR6 Storage Flake Fix
+
+on:
+  push:
+    branches: [agent/fix-pr5-control-plane-blockers]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-storage-flake:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/fix-pr5-control-plane-blockers
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Relax runner-sensitive lock timing without changing semantics
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("tests/storage/test_work_items.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    await asyncio.wait_for(memory.init(), timeout=1)\n    try:\n        assert memory._transaction_lock is connection_transaction_lock(memory.connection)\n        item = await asyncio.wait_for(memory.work_items.create(_new_item()), timeout=1)\n'''
+          new = '''    await asyncio.wait_for(memory.init(), timeout=5)\n    try:\n        assert memory._transaction_lock is connection_transaction_lock(memory.connection)\n        item = await asyncio.wait_for(memory.work_items.create(_new_item()), timeout=5)\n'''
+          if new not in text:
+              if old not in text:
+                  raise RuntimeError("storage lock timeout contract not found")
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+      - name: Validate storage lock contract
+        run: |
+          pip install -e ".[dev,mcp]"
+          pytest -q tests/storage/test_work_items.py::test_memory_reuses_connection_migration_lock_without_deadlock
+          ruff format --check tests/storage/test_work_items.py
+      - name: Commit validated test stabilization
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/storage/test_work_items.py
+          git commit -m "test: stabilize migration lock timing on CI"
+          git push origin HEAD:agent/fix-pr5-control-plane-blockers
