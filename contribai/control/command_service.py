@@ -375,7 +375,8 @@ class CommandService:
         async with lock:
             cursor = await self._memory.connection.execute(
                 """
-                SELECT patch_hash, approved_side_effects_json, expires_at
+                SELECT patch_hash, approved_side_effects_json, expires_at,
+                       base_sha, verification_id, quota_reservation_id
                 FROM publish_permits WHERE id = ?
                 """,
                 (permit_id,),
@@ -389,6 +390,9 @@ class CommandService:
                     )
                     != effects
                     or _aware(datetime.fromisoformat(str(existing[2]))) != expiry
+                    or str(existing[3] or "") != base_sha
+                    or str(existing[4] or "") != verification_id
+                    or str(existing[5] or "") != quota_reservation_id
                 ):
                     raise CommandStateError("PublishPermit ID conflicts with persisted permit")
                 return permit
@@ -415,15 +419,19 @@ class CommandService:
             await self._memory.connection.execute(
                 """
                 INSERT INTO publish_permits
-                    (id, work_item_id, review_request_id, patch_hash,
-                     approved_side_effects_json, expires_at, consumed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                    (id, work_item_id, review_request_id, patch_hash, base_sha,
+                     verification_id, quota_reservation_id, approved_side_effects_json,
+                     expires_at, consumed_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
                 """,
                 (
                     permit_id,
                     work_id,
                     review_id,
                     patch_sha256,
+                    base_sha,
+                    verification_id,
+                    quota_reservation_id,
                     json.dumps(sorted(effect.value for effect in effects)),
                     expiry.isoformat(),
                     datetime.now(UTC).isoformat(),

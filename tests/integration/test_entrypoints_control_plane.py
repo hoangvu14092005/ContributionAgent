@@ -172,6 +172,14 @@ async def test_live_approved_review_issues_proof_bound_publish_permit(memory) ->
     assert current.state is WorkState.PUBLISH_RESERVED
     cursor = await memory.connection.execute("SELECT COUNT(*) FROM publish_permits")
     assert (await cursor.fetchone())[0] == 1
+    cursor = await memory.connection.execute(
+        """
+        SELECT base_sha, verification_id, quota_reservation_id
+        FROM publish_permits WHERE work_item_id = ?
+        """,
+        (item.id,),
+    )
+    assert await cursor.fetchone() == ("base-12", verification_id, quota_id)
 
 
 @pytest.mark.asyncio

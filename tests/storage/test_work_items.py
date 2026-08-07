@@ -630,7 +630,7 @@ async def test_concurrent_migrations_on_same_connection_are_serialized(tmp_path:
         cursor = await connection.execute(
             "SELECT version, COUNT(*) FROM schema_migrations GROUP BY version"
         )
-        assert await cursor.fetchall() == [(1, 1)]
+        assert await cursor.fetchall() == [(1, 1), (2, 1)]
 
 
 @pytest.mark.asyncio
@@ -735,3 +735,36 @@ async def test_restart_recovery_preserves_publish_reserved_for_reconciliation(
             )
     finally:
         await second_memory.close()
+
+
+@pytest.mark.asyncio
+async def test_v1_database_migrates_publish_permit_proof_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "v1.db"
+    connection = await aiosqlite.connect(db_path)
+    try:
+        await connection.execute(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+        )
+        await connection.execute(
+            """
+            CREATE TABLE publish_permits (
+                id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL,
+                review_request_id TEXT, patch_hash TEXT NOT NULL,
+                approved_side_effects_json TEXT NOT NULL DEFAULT '[]',
+                expires_at TEXT NOT NULL, consumed_at TEXT, created_at TEXT NOT NULL
+            )
+            """
+        )
+        await connection.execute(
+            "INSERT INTO schema_migrations VALUES (1, 'contribution_control_plane', 'now')"
+        )
+        await connection.commit()
+        await migrate_work_item_schema(connection)
+        cursor = await connection.execute("PRAGMA table_info(publish_permits)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        assert {"base_sha", "verification_id", "quota_reservation_id"} <= columns
+        cursor = await connection.execute("SELECT name FROM schema_migrations WHERE version = 2")
+        assert await cursor.fetchone() == ("publish_permit_proof_bindings",)
+    finally:
+        await connection.close()
