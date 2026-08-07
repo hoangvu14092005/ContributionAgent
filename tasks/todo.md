@@ -33,7 +33,7 @@ Checklist này bám theo plan canonical tại docs/superpowers/plans/2026-08-07-
 ## Phase 3 — Product integration
 
 - [x] Task 12: OpportunityEngine và Issue-first orchestration.
-- [ ] Task 13: Persistent ReviewService và dynamic PR review context.
+- [x] Task 13: Persistent ReviewService và dynamic PR review context.
 - [ ] Task 14: CommandService và gom entrypoints.
 - [ ] Checkpoint 3: Safe end-to-end shadow/review/live flow.
 
