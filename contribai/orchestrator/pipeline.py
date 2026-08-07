@@ -1567,10 +1567,10 @@ class ContribPipeline:
         *,
         reason: str = "PR was closed",
     ) -> None:
-        """Close issues that were auto-created alongside a PR.
+        """Report linked issues that require a permit-bearing close command.
 
         Fetches the PR body, extracts linked issue numbers (Closes/Fixes #N),
-        and closes each one to avoid orphaned issues spamming the repo.
+        but performs no write because this legacy path has no PublishPermit.
         """
         import re
 
@@ -1586,24 +1586,14 @@ class ContribPipeline:
             )
 
             for issue_num in set(issue_numbers):
-                try:
-                    await self._github.close_issue(
-                        repo.owner,
-                        repo.name,
-                        int(issue_num),
-                        comment=(
-                            f"Auto-closing: linked PR #{pr_number} was closed "
-                            f"({reason}). Sorry for the inconvenience."
-                        ),
-                    )
-                    logger.info(
-                        "🗑️ Auto-closed issue #%s on %s (linked to PR #%d)",
-                        issue_num,
-                        repo.full_name,
-                        pr_number,
-                    )
-                except Exception:
-                    logger.debug("Could not close issue #%s on %s", issue_num, repo.full_name)
+                logger.warning(
+                    "Linked issue #%s on %s was not closed after PR #%d (%s): "
+                    "a publisher permit is required",
+                    issue_num,
+                    repo.full_name,
+                    pr_number,
+                    reason,
+                )
         except Exception:
             logger.debug("Could not fetch PR #%d body for issue cleanup", pr_number)
 
@@ -1672,24 +1662,14 @@ class ContribPipeline:
                     failed_names,
                 )
 
-                # Auto-close with comment
-                comment = (
-                    "## Auto-closed: CI checks failed\n\n"
-                    f"The following checks failed: **{failed_names}**\n\n"
-                    "Closing this PR since required CI checks did not pass. "
-                    "Sorry for the inconvenience."
-                )
-                await self._github.close_pull_request(
-                    repo.owner,
-                    repo.name,
+                logger.warning(
+                    "PR #%d was not auto-closed after CI failure because this path "
+                    "has no publisher permit",
                     pr_result.pr_number,
-                    comment=comment,
                 )
-                # Auto-close linked issues to avoid orphaned spam
                 await self._close_linked_issues(
                     repo, pr_result.pr_number, reason="CI checks failed"
                 )
-                # Record closed status in memory
                 await self._memory.update_pr_status(
                     repo.full_name, pr_result.pr_number, "ci_failed"
                 )

@@ -175,22 +175,22 @@ class TestGetOpenIssues:
 
 class TestForkRepo:
     @pytest.mark.asyncio
-    async def test_returns_fork_name(self):
+    async def test_requires_permit_bearing_publish_command(self):
         from contribai.mcp_server import _fork_repo
 
-        fork = MagicMock(full_name="me/upstream-repo")
         with patch("contribai.mcp_server.get_github") as mock_get_gh:
             gh = AsyncMock()
-            gh.fork_repository = AsyncMock(return_value=fork)
             mock_get_gh.return_value = gh
             result = await _fork_repo({"owner": "upstream", "repo": "upstream-repo"})
         data = _text(result)
-        assert data["fork_full_name"] == "me/upstream-repo"
+        assert "valid permit" in data["error"]
+        mock_get_gh.assert_not_awaited()
+        gh.fork_repository.assert_not_awaited()
 
 
 class TestCreateBranch:
     @pytest.mark.asyncio
-    async def test_returns_branch_ref(self):
+    async def test_requires_permit_bearing_publish_command(self):
         from contribai.mcp_server import _create_branch
 
         with patch("contribai.mcp_server.get_github") as mock_get_gh:
@@ -201,12 +201,14 @@ class TestCreateBranch:
                 {"fork_owner": "me", "repo": "r", "branch_name": "fix-typo"}
             )
         data = _text(result)
-        assert data["ref"] == "refs/heads/fix-typo"
+        assert "valid permit" in data["error"]
+        mock_get_gh.assert_not_awaited()
+        gh.create_branch.assert_not_awaited()
 
 
 class TestPushFileChange:
     @pytest.mark.asyncio
-    async def test_returns_commit_sha(self):
+    async def test_requires_permit_bearing_publish_command(self):
         from contribai.mcp_server import _push_file_change
 
         with patch("contribai.mcp_server.get_github") as mock_get_gh:
@@ -229,13 +231,14 @@ class TestPushFileChange:
                 }
             )
         data = _text(result)
-        assert data["commit_sha"] == "abc123"
-        assert "README.md" in data["content_url"]
+        assert "valid permit" in data["error"]
+        mock_get_gh.assert_not_awaited()
+        gh.create_or_update_file.assert_not_awaited()
 
 
 class TestCreatePR:
     @pytest.mark.asyncio
-    async def test_returns_pr_info(self):
+    async def test_requires_permit_bearing_publish_command(self):
         from contribai.mcp_server import _create_pr
 
         with patch("contribai.mcp_server.get_github") as mock_get_gh:
@@ -257,20 +260,16 @@ class TestCreatePR:
                     }
                 )
         data = _text(result)
-        assert data["pr_number"] == 42
-        assert "pull/42" in data["pr_url"]
-        mem.record_pr.assert_called_once_with(
-            repo="owner/repo",
-            pr_number=42,
-            pr_url="https://github.com/owner/repo/pull/42",
-            title="fix: typo",
-            pr_type="mcp",
-        )
+        assert "valid permit" in data["error"]
+        mock_get_gh.assert_not_awaited()
+        mock_get_mem.assert_not_awaited()
+        gh.create_pull_request.assert_not_awaited()
+        mem.record_pr.assert_not_awaited()
 
 
 class TestClosePR:
     @pytest.mark.asyncio
-    async def test_returns_success_true(self):
+    async def test_requires_permit_bearing_publish_command(self):
         from contribai.mcp_server import _close_pr
 
         with patch("contribai.mcp_server.get_github") as mock_get_gh:
@@ -279,10 +278,12 @@ class TestClosePR:
             mock_get_gh.return_value = gh
             result = await _close_pr({"owner": "o", "repo": "r", "pr_number": 1})
         data = _text(result)
-        assert data["success"] is True
+        assert "valid permit" in data["error"]
+        mock_get_gh.assert_not_awaited()
+        gh.close_pull_request.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_returns_success_false_on_error(self):
+    async def test_does_not_reach_github_errors_without_permit(self):
         from contribai.mcp_server import _close_pr
 
         with patch("contribai.mcp_server.get_github") as mock_get_gh:
@@ -291,7 +292,9 @@ class TestClosePR:
             mock_get_gh.return_value = gh
             result = await _close_pr({"owner": "o", "repo": "r", "pr_number": 99})
         data = _text(result)
-        assert data["success"] is False
+        assert "valid permit" in data["error"]
+        mock_get_gh.assert_not_awaited()
+        gh.close_pull_request.assert_not_awaited()
 
 
 class TestCheckDuplicatePR:

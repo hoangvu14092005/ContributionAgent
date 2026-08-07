@@ -295,20 +295,17 @@ class GitHubClient:
         return self._parse_repo(data)
 
     async def create_branch(
-        self, owner: str, repo: str, branch_name: str, from_branch: str | None = None
+        self,
+        owner: str,
+        repo: str,
+        branch_name: str,
+        *,
+        base_sha: str,
     ) -> dict:
-        """Create a new branch from the default or specified branch."""
-        if not from_branch:
-            details = await self.get_repo_details(owner, repo)
-            from_branch = details.default_branch
-
-        # Get the SHA of the source branch
-        ref_data = await self._get(f"/repos/{owner}/{repo}/git/ref/heads/{from_branch}")
-        sha = ref_data["object"]["sha"]
-
+        """Create a branch at the exact publisher-authorized base SHA."""
         data = await self._post(
             f"/repos/{owner}/{repo}/git/refs",
-            json={"ref": f"refs/heads/{branch_name}", "sha": sha},
+            json={"ref": f"refs/heads/{branch_name}", "sha": base_sha},
         )
         logger.info("Created branch %s on %s/%s", branch_name, owner, repo)
         return data
