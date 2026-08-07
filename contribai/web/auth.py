@@ -1,8 +1,4 @@
-"""API key authentication for the web dashboard.
-
-Simple API key verification via X-API-Key header
-or api_key query parameter.
-"""
+"""API key authentication for the web dashboard via X-API-Key."""
 
 from __future__ import annotations
 
@@ -12,12 +8,11 @@ import logging
 import secrets
 
 from fastapi import HTTPException, Security, status
-from fastapi.security import APIKeyHeader, APIKeyQuery
+from fastapi.security import APIKeyHeader
 
 logger = logging.getLogger(__name__)
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-_api_key_query = APIKeyQuery(name="api_key", auto_error=False)
 
 # Will be set during app lifespan
 _valid_keys: list[str] = []
@@ -47,10 +42,9 @@ def configure_auth(api_keys: list[str]):
 
 async def get_presented_api_key(
     header_key: str | None = Security(_api_key_header),
-    query_key: str | None = Security(_api_key_query),
 ) -> str | None:
-    """Return the presented API key without authorizing an execution mode."""
-    return header_key or query_key
+    """Return the header API key without authorizing an execution mode."""
+    return header_key
 
 
 def require_configured_api_key(key: str | None) -> str:
@@ -64,7 +58,7 @@ def require_configured_api_key(key: str | None) -> str:
     if not key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API key required. Use X-API-Key header or api_key param.",
+            detail="API key required. Use the X-API-Key header.",
         )
 
     if not any(hmac.compare_digest(key, valid) for valid in _valid_keys):
@@ -78,17 +72,15 @@ def require_configured_api_key(key: str | None) -> str:
 
 async def verify_api_key(
     header_key: str | None = Security(_api_key_header),
-    query_key: str | None = Security(_api_key_query),
 ) -> str | None:
-    """Verify API key from header or query param.
+    """Verify an API key from the X-API-Key header.
 
-    If no keys are configured, auth is disabled and
-    all requests pass through.
+    If no keys are configured, auth is disabled and all requests pass through.
     """
     if not _auth_enabled:
         return None
 
-    return require_configured_api_key(header_key or query_key)
+    return require_configured_api_key(header_key)
 
 
 def verify_webhook_signature(
