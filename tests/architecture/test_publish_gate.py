@@ -19,6 +19,17 @@ _PRODUCTION_ROOT = _PROJECT_ROOT / "contribai"
 _PUBLISHER_PATH = _PRODUCTION_ROOT / "publishing" / "github_publisher.py"
 _CLIENT_PATH = _PRODUCTION_ROOT / "github" / "client.py"
 _AUTHORITY_ISSUER = "_issue_github_write_authority"
+_CLIENT_AUTHORITY_ISSUER = "_issue_write_authority"
+_GITHUB_CLIENT_SENSITIVE_ATTRIBUTES = frozenset(
+    {
+        "__github_token",
+        "__github_transport",
+        "__github_write_authority",
+        "_GitHubClient__github_token",
+        "_GitHubClient__github_transport",
+        "_GitHubClient__github_write_authority",
+    }
+)
 _GITHUB_WRITE_METHODS = frozenset(
     {
         "close_issue",
@@ -91,7 +102,8 @@ def test_low_level_write_helpers_require_keyword_only_authority() -> None:
 
 
 def test_only_github_publisher_obtains_write_authority() -> None:
-    issuers: list[str] = []
+    publisher_issuers: list[str] = []
+    client_issuers: list[str] = []
 
     for path in sorted(_PRODUCTION_ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -104,10 +116,14 @@ def test_only_github_publisher_obtains_write_authority() -> None:
             elif isinstance(node.func, ast.Attribute):
                 called_name = node.func.attr
             if called_name == _AUTHORITY_ISSUER:
-                issuers.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+                publisher_issuers.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+            elif called_name == _CLIENT_AUTHORITY_ISSUER:
+                client_issuers.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
 
-    assert len(issuers) == 1
-    assert issuers[0].startswith("contribai/publishing/github_publisher.py:")
+    assert len(publisher_issuers) == 1
+    assert publisher_issuers[0].startswith("contribai/publishing/github_publisher.py:")
+    assert len(client_issuers) == 1
+    assert client_issuers[0].startswith("contribai/github/client.py:")
 
 
 def test_no_production_code_bypasses_client_write_methods_through_low_level_http() -> None:
@@ -133,6 +149,33 @@ def test_no_production_code_bypasses_client_write_methods_through_low_level_http
                 )
 
     assert violations == [], "Low-level GitHub writes bypass authority:\n" + "\n".join(violations)
+
+
+def test_no_production_code_accesses_github_raw_transport_or_token() -> None:
+    violations: list[str] = []
+
+    for path in sorted(_PRODUCTION_ROOT.rglob("*.py")):
+        if path == _CLIENT_PATH:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            sensitive_name = None
+            if isinstance(node, ast.Attribute) and node.attr in _GITHUB_CLIENT_SENSITIVE_ATTRIBUTES:
+                sensitive_name = node.attr
+            elif (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value in _GITHUB_CLIENT_SENSITIVE_ATTRIBUTES
+            ):
+                sensitive_name = node.value
+            if sensitive_name is not None:
+                violations.append(
+                    f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}:{sensitive_name}"
+                )
+
+    assert violations == [], "GitHub credentials/transport escaped client.py:\n" + "\n".join(
+        violations
+    )
 
 
 def test_write_authority_cannot_be_constructed_by_a_client_holder() -> None:

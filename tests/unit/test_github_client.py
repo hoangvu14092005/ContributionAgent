@@ -7,6 +7,7 @@ import httpx
 import pytest
 import respx
 
+import contribai.github.client as github_client_module
 from contribai.core.exceptions import GitHubAPIError
 from contribai.github.client import (
     GitHubClient,
@@ -75,9 +76,39 @@ class TestParseRepo:
 
 
 class TestClientHeaders:
-    def test_auth_header(self, client):
-        headers = client._client.headers
-        assert "authorization" in {k.lower() for k in headers}
+    def test_raw_transport_is_credential_free_by_default(self, client):
+        transport = client._GitHubClient__github_transport
+
+        assert "authorization" not in {key.lower() for key in transport.headers}
+
+    def test_legacy_raw_transport_and_token_aliases_are_not_exposed(self, client):
+        assert "_client" not in vars(client)
+        assert "_token" not in vars(client)
+
+    @pytest.mark.asyncio
+    async def test_direct_raw_transport_write_carries_no_authorization(self, client):
+        transport = client._GitHubClient__github_transport
+        with respx.mock:
+            route = respx.post("https://api.github.com/repos/acme/widgets/issues").mock(
+                return_value=httpx.Response(401, json={"message": "Requires authentication"})
+            )
+
+            response = await transport.post("/repos/acme/widgets/issues", json={})
+
+        assert response.status_code == 401
+        assert "authorization" not in route.calls.last.request.headers
+
+    @pytest.mark.asyncio
+    async def test_guarded_read_injects_authorization(self, client):
+        with respx.mock:
+            route = respx.get("https://api.github.com/user").mock(
+                return_value=httpx.Response(200, json={"login": "contribai-bot"})
+            )
+
+            result = await client.get_authenticated_user()
+
+        assert result["login"] == "contribai-bot"
+        assert route.calls.last.request.headers["Authorization"] == "Bearer ghp_test_token"
 
 
 class TestContributingGuide:
@@ -208,9 +239,41 @@ class TestDeleteRepository:
 
 
 class TestWriteAuthority:
+    def test_imported_internal_proof_cannot_construct_authority(self, client):
+        imported_proof = getattr(
+            github_client_module,
+            "_WRITE_AUTHORITY_PROOF",
+            object(),
+        )
+
+        with pytest.raises(TypeError, match="only be issued"):
+            GitHubWriteAuthority(imported_proof, client)
+
+    def test_module_exposes_no_reusable_authority_proof(self):
+        assert "_WRITE_AUTHORITY_PROOF" not in vars(github_client_module)
+
+    def test_object_new_forgery_is_rejected_by_client_identity(self, client):
+        forged = object.__new__(GitHubWriteAuthority)
+
+        with pytest.raises(GitHubWriteAuthorityError, match="publisher authority"):
+            github_client_module._require_github_write_authority(client, forged)
+
     def test_non_publisher_cannot_obtain_authority(self, client):
         with pytest.raises(GitHubWriteAuthorityError, match="bound GitHubPublisher"):
             _issue_github_write_authority(client, object())
+
+    def test_client_retains_one_exact_authority_identity(self, client):
+        publisher = GitHubPublisher(client, PolicyEngine())
+        issued = publisher._GitHubPublisher__write_authority
+
+        assert _issue_github_write_authority(client, publisher) is issued
+
+    def test_publisher_subclass_cannot_obtain_authority(self, client):
+        class PublisherSubclass(GitHubPublisher):
+            pass
+
+        with pytest.raises(GitHubWriteAuthorityError, match="bound GitHubPublisher"):
+            PublisherSubclass(client, PolicyEngine())
 
     @pytest.mark.asyncio
     async def test_authority_is_bound_to_the_issuing_client(self, client):

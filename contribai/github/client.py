@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
 _MUTATING_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-_WRITE_AUTHORITY_PROOF = object()
 
 
 class GitHubWriteAuthorityError(PermissionError):
@@ -27,63 +26,69 @@ class GitHubWriteAuthorityError(PermissionError):
 
 
 class GitHubWriteAuthority:
-    """Opaque, client-bound capability passed only by GitHubPublisher."""
+    """Opaque identity capability issued and retained by one GitHubClient."""
 
-    __slots__ = ("_client", "_proof")
+    __slots__ = ()
 
-    def __init__(self, proof: object = None, client: object = None) -> None:
-        if proof is not _WRITE_AUTHORITY_PROOF or client is None:
-            raise TypeError("GitHub write authority can only be issued to GitHubPublisher")
-        self._proof = proof
-        self._client = client
+    def __new__(cls, *args: object, **kwargs: object) -> GitHubWriteAuthority:
+        raise TypeError("GitHub write authority can only be issued by GitHubClient")
 
 
 def _issue_github_write_authority(
     client: GitHubClient,
     publisher: object,
 ) -> GitHubWriteAuthority:
-    """Issue authority only to the exact GitHubPublisher bound to this client."""
-    from contribai.publishing.github_publisher import GitHubPublisher
-
-    if type(publisher) is not GitHubPublisher or publisher._github is not client:
-        raise GitHubWriteAuthorityError(
-            "GitHub write authority can only be issued to the bound GitHubPublisher"
-        )
-    return GitHubWriteAuthority(_WRITE_AUTHORITY_PROOF, client)
+    """Ask the client to issue authority to its exact bound GitHubPublisher."""
+    return client._issue_write_authority(publisher)
 
 
 def _require_github_write_authority(
     client: GitHubClient,
     authority: GitHubWriteAuthority | None,
 ) -> None:
-    if (
-        not isinstance(authority, GitHubWriteAuthority)
-        or authority._proof is not _WRITE_AUTHORITY_PROOF
-        or authority._client is not client
-    ):
-        raise GitHubWriteAuthorityError(
-            "GitHub mutation requires GitHubPublisher publisher authority"
-        )
+    client._require_write_authority(authority)
 
 
 class GitHubClient:
     """Async GitHub REST API client."""
 
     def __init__(self, token: str, rate_limit_buffer: int = 100):
-        self._token = token
+        self.__github_token = token
         self._rate_limit_buffer = rate_limit_buffer
-        self._client = httpx.AsyncClient(
+        self.__github_transport = httpx.AsyncClient(
             base_url=GITHUB_API,
             headers={
-                "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
             timeout=30.0,
         )
+        self.__github_write_authority: GitHubWriteAuthority | None = None
 
     async def close(self):
-        await self._client.aclose()
+        await self.__github_transport.aclose()
+
+    def _issue_write_authority(self, publisher: object) -> GitHubWriteAuthority:
+        """Issue one client-retained identity after exact publisher validation."""
+        from contribai.publishing.github_publisher import GitHubPublisher
+
+        if type(publisher) is not GitHubPublisher or publisher._github is not self:
+            raise GitHubWriteAuthorityError(
+                "GitHub write authority can only be issued to the bound GitHubPublisher"
+            )
+        if self.__github_write_authority is None:
+            self.__github_write_authority = object.__new__(GitHubWriteAuthority)
+        return self.__github_write_authority
+
+    def _require_write_authority(
+        self,
+        authority: GitHubWriteAuthority | None,
+    ) -> None:
+        """Require the exact identity retained by this client."""
+        if authority is None or authority is not self.__github_write_authority:
+            raise GitHubWriteAuthorityError(
+                "GitHub mutation requires GitHubPublisher publisher authority"
+            )
 
     # ── Core HTTP ──────────────────────────────────────────────────────────
 
@@ -101,11 +106,19 @@ class GitHubClient:
 
         if method.upper() in _MUTATING_HTTP_METHODS:
             _require_github_write_authority(self, authority)
+        request_kwargs = dict(kwargs)
+        headers = httpx.Headers(request_kwargs.pop("headers", None))
+        headers["Authorization"] = f"Bearer {self.__github_token}"
+        request_kwargs["headers"] = headers
 
         last_error = None
         for attempt in range(1, _retries + 1):
             try:
-                response = await self._client.request(method, url, **kwargs)
+                response = await self.__github_transport.request(
+                    method,
+                    url,
+                    **request_kwargs,
+                )
             except httpx.HTTPError as e:
                 raise GitHubAPIError(f"HTTP error: {e}") from e
 
@@ -169,11 +182,19 @@ class GitHubClient:
 
         if method.upper() in _MUTATING_HTTP_METHODS:
             _require_github_write_authority(self, authority)
+        request_kwargs = dict(kwargs)
+        headers = httpx.Headers(request_kwargs.pop("headers", None))
+        headers["Authorization"] = f"Bearer {self.__github_token}"
+        request_kwargs["headers"] = headers
 
         last_error = None
         for attempt in range(1, _retries + 1):
             try:
-                response = await self._client.request(method, url, **kwargs)
+                response = await self.__github_transport.request(
+                    method,
+                    url,
+                    **request_kwargs,
+                )
             except httpx.HTTPError as e:
                 raise GitHubAPIError(f"HTTP error: {e}") from e
 
@@ -594,7 +615,7 @@ class GitHubClient:
     async def get_pr_diff(self, owner: str, repo: str, pr_number: int) -> str:
         """Get the diff of a pull request.
 
-        Bug 5 fix: use _request_raw() instead of self._client.get() directly so
+        Bug 5 fix: use _request_raw() instead of the raw transport directly so
         that retry logic, rate-limit handling, and error wrapping all apply.
         """
         response = await self._request_raw(

@@ -20,7 +20,7 @@ from contribai.core.models import (
     Repository,
     Severity,
 )
-from contribai.github.client import GitHubWriteAuthority
+from contribai.github.client import GitHubClient, GitHubWriteAuthority
 from contribai.publishing.capability import GITHUB_PUBLISHER_ACTOR, Capability
 from contribai.publishing.github_publisher import GitHubPublisher, PublishPolicyError
 from contribai.publishing.idempotency import InMemoryIdempotencyStore
@@ -100,7 +100,11 @@ def permit(candidate: ContributionPublishCandidate) -> PublishPermit:
 
 @pytest.fixture
 def github(target_repo: Repository) -> AsyncMock:
-    client = AsyncMock()
+    client = AsyncMock(spec=GitHubClient)
+    client._GitHubClient__github_write_authority = None
+    client._issue_write_authority.side_effect = lambda publisher: (
+        GitHubClient._issue_write_authority(client, publisher)
+    )
     client.get_authenticated_user.return_value = {
         "login": "contribai-bot",
         "id": 42,
