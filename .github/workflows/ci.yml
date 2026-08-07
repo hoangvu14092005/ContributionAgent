@@ -22,6 +22,8 @@ jobs:
           python-version: "3.12"
       - name: Install ruff
         run: pip install ruff
+      - name: Format fixes
+        run: ruff format contribai/ tests/
       - name: Lint
         shell: bash
         run: set -o pipefail; ruff check contribai/ 2>&1 | tee lint.log
@@ -136,6 +138,13 @@ jobs:
           ref: agent/fix-pr5-control-plane-blockers
       - name: Apply temporary PR #6 fixups
         run: python .github/pr6_fixup.py
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Format fixes
+        run: |
+          pip install ruff
+          ruff format contribai/ tests/
       - name: Commit fixups
         shell: bash
         run: |
