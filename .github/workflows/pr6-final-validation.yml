@@ -1,0 +1,55 @@
+name: PR6 Final Validation
+
+on:
+  push:
+    branches: [agent/fix-pr5-control-plane-blockers]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check contribai/
+      - run: ruff format --check contribai/ tests/
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev,mcp]"
+      - run: pytest tests/ -q --tb=short --cov=contribai --cov-report=term-missing --cov-fail-under=50
+      - run: python -m compileall -q contribai
+
+  architecture-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,mcp]"
+      - run: >-
+          pytest -q tests/architecture tests/safety tests/execution
+          tests/engines/contracts tests/engines/adapters
+          tests/integration/test_entrypoints_control_plane.py
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]" pip-audit
+      - run: pip-audit --ignore-vuln CVE-2026-4539
