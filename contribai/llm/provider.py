@@ -187,9 +187,7 @@ def make_provider(name: str, config: LLMConfig) -> LLMProvider:
     provider_cls = LLM_PROVIDERS.get(name)
     if provider_cls is None:
         available = ", ".join(sorted(LLM_PROVIDERS)) or "<none>"
-        raise LLMError(
-            f"Unknown LLM provider: {name!r}. Available: {available}"
-        )
+        raise LLMError(f"Unknown LLM provider: {name!r}. Available: {available}")
     return provider_cls(config)
 
 
@@ -885,17 +883,17 @@ def create_llm_provider(
 
 
 __all__ = [
-    "LLMProvider",
     "LLM_PROVIDERS",
-    "register_provider",
-    "make_provider",
-    "available_providers",
-    "GeminiProvider",
-    "OpenAIProvider",
     "AnthropicProvider",
-    "OllamaProvider",
-    "CustomProvider",
     "CopilotProvider",
+    "CustomProvider",
+    "GeminiProvider",
+    "LLMProvider",
     "MultiModelProvider",
+    "OllamaProvider",
+    "OpenAIProvider",
+    "available_providers",
     "create_llm_provider",
+    "make_provider",
+    "register_provider",
 ]

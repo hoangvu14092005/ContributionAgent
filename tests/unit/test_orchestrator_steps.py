@@ -8,7 +8,6 @@ conductor itself is tested in ``test_pipeline_core.py``.
 
 from __future__ import annotations
 
-from typing import Iterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -32,7 +31,6 @@ from contribai.orchestrator.steps import (
     submit_pr_step,
     validate_findings_step,
 )
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -202,15 +200,12 @@ class TestLoadRepoContextStep:
 
 class TestRunAnalysisStep:
     async def test_emits_start_and_complete_events(self, ctx, state):
-        ctx.analyzer.analyze = AsyncMock(
-            return_value=AnalysisResult(repo=state.repo, findings=[])
-        )
+        ctx.analyzer.analyze = AsyncMock(return_value=AnalysisResult(repo=state.repo, findings=[]))
         ctx.memory.record_analysis = AsyncMock()
         ctx.memory.store_context = AsyncMock()
 
         await run_analysis_step(ctx, state)
 
-        events = ctx.event_bus._subscribers  # noqa: SLF001 — internal but tests need it
         # Easier check: just look at the events that fired by tapping subscribers
         captured: list = []
         ctx.event_bus.subscribe_all(captured.append)
@@ -222,9 +217,7 @@ class TestRunAnalysisStep:
         assert "Event" in types or types == []  # best-effort sanity
 
     async def test_no_findings_sets_skip_reason(self, ctx, state):
-        ctx.analyzer.analyze = AsyncMock(
-            return_value=AnalysisResult(repo=state.repo, findings=[])
-        )
+        ctx.analyzer.analyze = AsyncMock(return_value=AnalysisResult(repo=state.repo, findings=[]))
         await run_analysis_step(ctx, state)
         assert state.skip_reason == "no_findings"
         assert state.findings == []
@@ -265,9 +258,7 @@ class TestRunAnalysisStep:
 
     async def test_record_analysis_failure_is_swallowed(self, ctx, state):
         ctx.analyzer.analyze = AsyncMock(
-            return_value=AnalysisResult(
-                repo=state.repo, findings=[_make_finding()]
-            )
+            return_value=AnalysisResult(repo=state.repo, findings=[_make_finding()])
         )
         ctx.memory.record_analysis.side_effect = RuntimeError("db down")
         # Should not raise
@@ -306,7 +297,6 @@ class TestValidateFindingsStep:
         assert len(state.validated_findings) == 1
 
     async def test_dedup_drops_similar_titles(self, ctx, state):
-        from contribai.core.models import FileNode
 
         state.findings = [_make_finding(title="Fix null pointer in login")]
         ctx.github.get_file_tree = AsyncMock(return_value=[])
@@ -337,7 +327,6 @@ class TestValidateFindingsStep:
         assert state.validated_findings == []
 
     async def test_llm_validation_invalid_drops_finding(self, ctx, state, finding):
-        from contribai.core.models import FileNode
 
         state.findings = [finding]
         ctx.github.get_file_tree = AsyncMock(return_value=[])
@@ -349,7 +338,6 @@ class TestValidateFindingsStep:
         assert state.validated_findings == []
 
     async def test_llm_exception_keeps_finding(self, ctx, state, finding):
-        from contribai.core.models import FileNode
 
         state.findings = [finding]
         ctx.github.get_file_tree = AsyncMock(return_value=[])
@@ -362,8 +350,7 @@ class TestValidateFindingsStep:
 
     async def test_cap_by_max_findings_per_repo(self, ctx, state):
         findings = [
-            _make_finding(title=f"Issue {i}", file_path=f"src/file_{i}.py")
-            for i in range(10)
+            _make_finding(title=f"Issue {i}", file_path=f"src/file_{i}.py") for i in range(10)
         ]
         state.findings = findings
         ctx.github.get_file_tree = AsyncMock(return_value=[])
@@ -432,9 +419,7 @@ class TestGenerateContributionStep:
         state.validated_findings = [finding]
         state.context = MagicMock(spec=RepoContext)
         ctx.generator.generate = AsyncMock(return_value=_make_contribution(finding))
-        ctx.reviewer.review = AsyncMock(
-            return_value=ReviewDecision(ReviewDecision.SKIP)
-        )
+        ctx.reviewer.review = AsyncMock(return_value=ReviewDecision(ReviewDecision.SKIP))
         await generate_contribution_step(ctx, state)
         assert state.result.contributions_generated == 1
         assert len(state.contributions) == 1
@@ -490,8 +475,12 @@ class TestSubmitPrStep:
         contribution = _make_contribution(finding)
         state.contributions = [contribution]
         pr_result = PRResult(
-            repo=state.repo, contribution=contribution,
-            pr_number=1, pr_url="x", branch_name="b", fork_full_name="bot/o",
+            repo=state.repo,
+            contribution=contribution,
+            pr_number=1,
+            pr_url="x",
+            branch_name="b",
+            fork_full_name="bot/o",
         )
         ctx.pr_manager.create_pr = AsyncMock(return_value=pr_result)
         ctx.pr_manager.check_compliance_and_fix = AsyncMock(
@@ -514,8 +503,12 @@ class TestSubmitPrStep:
         state.contributions = [contribution]
         state.closes_issues = [42]  # parallel list — i-th entry → i-th contribution
         pr_result = PRResult(
-            repo=state.repo, contribution=contribution,
-            pr_number=1, pr_url="x", branch_name="b", fork_full_name="bot/o",
+            repo=state.repo,
+            contribution=contribution,
+            pr_number=1,
+            pr_url="x",
+            branch_name="b",
+            fork_full_name="bot/o",
         )
         ctx.pr_manager.create_pr = AsyncMock(return_value=pr_result)
         ctx.pr_manager.check_compliance_and_fix = AsyncMock()
@@ -552,8 +545,7 @@ class TestIdentifyKeyFiles:
         from contribai.core.models import FileNode
 
         tree = [
-            FileNode(path=f"src/file_{i}.py", type="blob", size=10, sha=str(i))
-            for i in range(30)
+            FileNode(path=f"src/file_{i}.py", type="blob", size=10, sha=str(i)) for i in range(30)
         ]
         keys = identify_key_files(tree, repo)
         assert len(keys) == 15

@@ -29,8 +29,8 @@ __all__ = [
     "AnalyzerPlugin",
     "GeneratorPlugin",
     "PluginRegistry",
-    "get_plugin_registry",
     "discover",
+    "get_plugin_registry",
     "reset_plugin_registry",
 ]
 

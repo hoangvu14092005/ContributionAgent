@@ -15,8 +15,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from contribai.llm.agents import (
-    AnalysisAgent,
     AgentCoordinator,
+    AnalysisAgent,
     BaseAgent,
     CodeGenAgent,
     DocsAgent,

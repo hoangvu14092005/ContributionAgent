@@ -160,13 +160,10 @@ class CodeAnalyzer:
         # before deduplication.
         if self._plugin_analyzers:
             plugin_tasks = [
-                self._run_plugin_analyzer(plugin, context)
-                for plugin in self._plugin_analyzers
+                self._run_plugin_analyzer(plugin, context) for plugin in self._plugin_analyzers
             ]
-            plugin_results = await asyncio.gather(
-                *plugin_tasks, return_exceptions=True
-            )
-            for plugin, result in zip(self._plugin_analyzers, plugin_results):
+            plugin_results = await asyncio.gather(*plugin_tasks, return_exceptions=True)
+            for plugin, result in zip(self._plugin_analyzers, plugin_results, strict=True):
                 if isinstance(result, Exception):
                     logger.error(
                         "Plugin analyzer %s failed: %s",

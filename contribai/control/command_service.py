@@ -552,9 +552,7 @@ def _permit_id(
     publish_sha256: str,
     verification_id: str,
 ) -> str:
-    identity = "\x00".join(
-        (work_id, review_id, patch_sha256, publish_sha256, verification_id)
-    )
+    identity = "\x00".join((work_id, review_id, patch_sha256, publish_sha256, verification_id))
     return f"permit-{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
 
 

@@ -78,21 +78,25 @@ class ProviderSlot:
 
 
 # Slot provider names that are OpenAI-compatible but use the "custom" base class.
-_OPENAI_COMPATIBLE_SLOT_NAMES = frozenset({
-    "rocket-free-2",
-    "rocket-free-1",
-    "kilo",
-    "opencode",
-})
+_OPENAI_COMPATIBLE_SLOT_NAMES = frozenset(
+    {
+        "rocket-free-2",
+        "rocket-free-1",
+        "kilo",
+        "opencode",
+    }
+)
 
 # Native provider names known to the registry.
-_KNOWN_NATIVE_PROVIDERS = frozenset({
-    "openai",
-    "anthropic",
-    "ollama",
-    "gemini",
-    "custom",
-})
+_KNOWN_NATIVE_PROVIDERS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "ollama",
+        "gemini",
+        "custom",
+    }
+)
 
 
 def _create_provider_for_slot(slot: ProviderSlot, base_config: LLMConfig) -> LLMProvider:
