@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
@@ -37,6 +37,7 @@ class PublishPermit:
     repo: str
     base_sha: str
     patch_sha256: str
+    publish_sha256: str
     verification_id: str
     review_id: str
     approved_side_effects: frozenset[PublishSideEffect]
@@ -60,6 +61,9 @@ class PublishCandidate(Protocol):
     def patch_sha256(self) -> str: ...
 
     @property
+    def publish_sha256(self) -> str: ...
+
+    @property
     def guidelines(self) -> Any | None: ...
 
     @property
@@ -77,6 +81,7 @@ class ContributionPublishCandidate:
     _target_repo_json: str
     _base_sha: str
     _patch_sha256: str
+    _publish_sha256: str
     _repo: str
     _guidelines: Any | None
     _closes_issue: int | None
@@ -138,10 +143,41 @@ class ContributionPublishCandidate:
             ensure_ascii=False,
         ).encode("utf-8")
 
+        if guidelines is None:
+            guidelines_payload = None
+        elif is_dataclass(guidelines) and not isinstance(guidelines, type):
+            guidelines_payload = asdict(guidelines)
+        elif hasattr(guidelines, "model_dump"):
+            guidelines_payload = guidelines.model_dump(mode="json")
+        else:
+            raise PublishCandidateError("guidelines must be a dataclass or serializable model")
+
+        publish_payload = {
+            "base_sha": base_sha.strip(),
+            "closes_issue": closes_issue,
+            "contribution": contribution_snapshot.model_dump(
+                mode="json",
+                exclude={"generated_at"},
+            ),
+            "guidelines": guidelines_payload,
+            "target_repo": target_repo_snapshot.model_dump(mode="json"),
+        }
+        encoded_publish_payload = json.dumps(
+            publish_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+
         object.__setattr__(self, "_contribution_json", contribution_snapshot.model_dump_json())
         object.__setattr__(self, "_target_repo_json", target_repo_snapshot.model_dump_json())
         object.__setattr__(self, "_base_sha", base_sha.strip())
         object.__setattr__(self, "_patch_sha256", hashlib.sha256(encoded_payload).hexdigest())
+        object.__setattr__(
+            self,
+            "_publish_sha256",
+            hashlib.sha256(encoded_publish_payload).hexdigest(),
+        )
         object.__setattr__(self, "_repo", canonical_repo)
         object.__setattr__(self, "_guidelines", copy.deepcopy(guidelines))
         object.__setattr__(self, "_closes_issue", closes_issue)
@@ -172,6 +208,11 @@ class ContributionPublishCandidate:
     @property
     def patch_sha256(self) -> str:
         return self._patch_sha256
+
+    @property
+    def publish_sha256(self) -> str:
+        """Fingerprint every value that can affect GitHub publish side effects."""
+        return self._publish_sha256
 
     @property
     def guidelines(self) -> Any | None:

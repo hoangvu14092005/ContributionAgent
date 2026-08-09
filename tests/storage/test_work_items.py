@@ -630,7 +630,7 @@ async def test_concurrent_migrations_on_same_connection_are_serialized(tmp_path:
         cursor = await connection.execute(
             "SELECT version, COUNT(*) FROM schema_migrations GROUP BY version"
         )
-        assert await cursor.fetchall() == [(1, 1), (2, 1)]
+        assert await cursor.fetchall() == [(1, 1), (2, 1), (3, 1)]
 
 
 @pytest.mark.asyncio
@@ -763,8 +763,10 @@ async def test_v1_database_migrates_publish_permit_proof_columns(tmp_path: Path)
         await migrate_work_item_schema(connection)
         cursor = await connection.execute("PRAGMA table_info(publish_permits)")
         columns = {row[1] for row in await cursor.fetchall()}
-        assert {"base_sha", "verification_id", "quota_reservation_id"} <= columns
+        assert {"base_sha", "verification_id", "quota_reservation_id", "publish_hash"} <= columns
         cursor = await connection.execute("SELECT name FROM schema_migrations WHERE version = 2")
         assert await cursor.fetchone() == ("publish_permit_proof_bindings",)
+        cursor = await connection.execute("SELECT name FROM schema_migrations WHERE version = 3")
+        assert await cursor.fetchone() == ("publish_permit_review_binding",)
     finally:
         await connection.close()

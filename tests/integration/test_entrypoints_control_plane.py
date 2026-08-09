@@ -146,10 +146,10 @@ async def test_live_approved_review_issues_proof_bound_publish_permit(memory) ->
     )
     request = await commands.request_review(
         item.id,
-        "patch-12",
+        "publish-12",
         required_side_effects=(PublishSideEffect.CREATE_PR,),
     )
-    item = await commands.approve(request.id, "patch-12")
+    item = await commands.approve(request.id, "publish-12")
     quota_id = await commands.reserve_publish_quota(
         item.id,
         provider="github",
@@ -161,12 +161,15 @@ async def test_live_approved_review_issues_proof_bound_publish_permit(memory) ->
         request.id,
         base_sha="base-12",
         patch_sha256="patch-12",
+        publish_sha256="publish-12",
         verification_id=verification_id,
         quota_reservation_id=quota_id,
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )
 
     assert permit.review_id == request.id
+    assert permit.patch_sha256 == "patch-12"
+    assert permit.publish_sha256 == "publish-12"
     assert permit.approved_side_effects == frozenset({PublishSideEffect.CREATE_PR})
     current = await commands.get(item.id)
     assert current.state is WorkState.PUBLISH_RESERVED
@@ -174,12 +177,12 @@ async def test_live_approved_review_issues_proof_bound_publish_permit(memory) ->
     assert (await cursor.fetchone())[0] == 1
     cursor = await memory.connection.execute(
         """
-        SELECT base_sha, verification_id, quota_reservation_id
+        SELECT base_sha, verification_id, quota_reservation_id, publish_hash
         FROM publish_permits WHERE work_item_id = ?
         """,
         (item.id,),
     )
-    assert await cursor.fetchone() == ("base-12", verification_id, quota_id)
+    assert await cursor.fetchone() == ("base-12", verification_id, quota_id, "publish-12")
 
 
 @pytest.mark.asyncio
@@ -218,6 +221,7 @@ async def test_shadow_and_review_only_work_cannot_issue_publish_permit(memory) -
                 request.id,
                 base_sha="base",
                 patch_sha256=f"patch-{mode.value}",
+                publish_sha256=f"patch-{mode.value}",
                 verification_id=verification_id,
                 quota_reservation_id="quota",
                 expires_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -260,6 +264,7 @@ async def test_permit_cannot_widen_reviewed_side_effect_scope(memory) -> None:
             request.id,
             base_sha="base",
             patch_sha256="scope-patch",
+            publish_sha256="scope-patch",
             verification_id=verification_id,
             quota_reservation_id=quota_id,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),

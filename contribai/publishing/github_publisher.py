@@ -59,6 +59,7 @@ class GitHubPublisher:
             repo=candidate.repo,
             base_sha=candidate.base_sha,
             patch_sha256=candidate.patch_sha256,
+            publish_sha256=candidate.publish_sha256,
         )
         return await self._idempotency_store.execute(
             key,
@@ -71,6 +72,7 @@ class GitHubPublisher:
             "repo": permit.repo,
             "base sha": permit.base_sha,
             "patch sha256": permit.patch_sha256,
+            "publish sha256": permit.publish_sha256,
             "verification id": permit.verification_id,
             "review id": permit.review_id,
             "quota reservation id": permit.quota_reservation_id,
@@ -90,6 +92,10 @@ class GitHubPublisher:
         if permit.patch_sha256 != candidate.patch_sha256:
             raise PublishPermitError(
                 "Publish permit patch hash does not match candidate patch hash"
+            )
+        if permit.publish_sha256 != candidate.publish_sha256:
+            raise PublishPermitError(
+                "Publish permit publish hash does not match candidate publish hash"
             )
 
         if not isinstance(permit.approved_side_effects, frozenset):

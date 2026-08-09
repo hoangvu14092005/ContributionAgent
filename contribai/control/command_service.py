@@ -286,6 +286,7 @@ class CommandService:
         *,
         base_sha: str,
         patch_sha256: str,
+        publish_sha256: str,
         verification_id: str,
         quota_reservation_id: str,
         expires_at: datetime,
@@ -305,11 +306,17 @@ class CommandService:
             or not review.decision.approved
         ):
             raise CommandStateError("PublishPermit requires an approved matching review")
-        if review.candidate_hash != patch_sha256:
-            raise CommandStateError("PublishPermit patch hash does not match review proof")
+        if review.candidate_hash != publish_sha256:
+            raise CommandStateError("PublishPermit publish hash does not match review proof")
         if not all(
             value.strip()
-            for value in (base_sha, patch_sha256, verification_id, quota_reservation_id)
+            for value in (
+                base_sha,
+                patch_sha256,
+                publish_sha256,
+                verification_id,
+                quota_reservation_id,
+            )
         ):
             raise ValueError("PublishPermit proof bindings must not be empty")
         expiry = _aware(expires_at)
@@ -358,12 +365,19 @@ class CommandService:
             if quota[1] is not None and _aware(datetime.fromisoformat(str(quota[1]))) <= now:
                 raise CommandStateError("Publish quota reservation has expired")
 
-        permit_id = _permit_id(work_id, review_id, patch_sha256, verification_id)
+        permit_id = _permit_id(
+            work_id,
+            review_id,
+            patch_sha256,
+            publish_sha256,
+            verification_id,
+        )
         permit = PublishPermit(
             work_id=work_id,
             repo=item.repo,
             base_sha=base_sha,
             patch_sha256=patch_sha256,
+            publish_sha256=publish_sha256,
             verification_id=verification_id,
             review_id=review_id,
             approved_side_effects=effects,
@@ -375,7 +389,7 @@ class CommandService:
         async with lock:
             cursor = await self._memory.connection.execute(
                 """
-                SELECT patch_hash, approved_side_effects_json, expires_at,
+                SELECT patch_hash, publish_hash, approved_side_effects_json, expires_at,
                        base_sha, verification_id, quota_reservation_id
                 FROM publish_permits WHERE id = ?
                 """,
@@ -386,13 +400,14 @@ class CommandService:
                 if (
                     str(existing[0]) != patch_sha256
                     or frozenset(
-                        PublishSideEffect(effect) for effect in json.loads(str(existing[1]) or "[]")
+                        PublishSideEffect(effect) for effect in json.loads(str(existing[2]) or "[]")
                     )
                     != effects
-                    or _aware(datetime.fromisoformat(str(existing[2]))) != expiry
-                    or str(existing[3] or "") != base_sha
-                    or str(existing[4] or "") != verification_id
-                    or str(existing[5] or "") != quota_reservation_id
+                    or str(existing[1] or "") != publish_sha256
+                    or _aware(datetime.fromisoformat(str(existing[3]))) != expiry
+                    or str(existing[4] or "") != base_sha
+                    or str(existing[5] or "") != verification_id
+                    or str(existing[6] or "") != quota_reservation_id
                 ):
                     raise CommandStateError("PublishPermit ID conflicts with persisted permit")
                 return permit
@@ -410,7 +425,8 @@ class CommandService:
                     "review_id": review_id,
                     "verification_id": verification_id,
                     "quota_reservation_id": quota_reservation_id,
-                    "candidate_hash": patch_sha256,
+                    "candidate_hash": publish_sha256,
+                    "patch_sha256": patch_sha256,
                 },
             )
 
@@ -419,16 +435,17 @@ class CommandService:
             await self._memory.connection.execute(
                 """
                 INSERT INTO publish_permits
-                    (id, work_item_id, review_request_id, patch_hash, base_sha,
+                    (id, work_item_id, review_request_id, patch_hash, publish_hash, base_sha,
                      verification_id, quota_reservation_id, approved_side_effects_json,
                      expires_at, consumed_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
                 """,
                 (
                     permit_id,
                     work_id,
                     review_id,
                     patch_sha256,
+                    publish_sha256,
                     base_sha,
                     verification_id,
                     quota_reservation_id,
@@ -528,8 +545,16 @@ def _work_id(repo: str, issue_number: int | None, idempotency_key: str | None) -
     return f"work-{digest}"
 
 
-def _permit_id(work_id: str, review_id: str, patch_sha256: str, verification_id: str) -> str:
-    identity = "\x00".join((work_id, review_id, patch_sha256, verification_id))
+def _permit_id(
+    work_id: str,
+    review_id: str,
+    patch_sha256: str,
+    publish_sha256: str,
+    verification_id: str,
+) -> str:
+    identity = "\x00".join(
+        (work_id, review_id, patch_sha256, publish_sha256, verification_id)
+    )
     return f"permit-{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
 
 

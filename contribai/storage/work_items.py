@@ -188,9 +188,14 @@ _PUBLISH_PERMIT_PROOF_BINDINGS_V2: Final[tuple[str, ...]] = (
     "ALTER TABLE publish_permits ADD COLUMN quota_reservation_id TEXT",
 )
 
+_PUBLISH_PERMIT_REVIEW_BINDING_V3: Final[tuple[str, ...]] = (
+    "ALTER TABLE publish_permits ADD COLUMN publish_hash TEXT",
+)
+
 MIGRATIONS: Final[tuple[tuple[int, str, tuple[str, ...]], ...]] = (
     (1, "contribution_control_plane", _CONTROL_PLANE_V1),
     (2, "publish_permit_proof_bindings", _PUBLISH_PERMIT_PROOF_BINDINGS_V2),
+    (3, "publish_permit_review_binding", _PUBLISH_PERMIT_REVIEW_BINDING_V3),
 )
 
 _CONNECTION_LOCKS: WeakKeyDictionary[aiosqlite.Connection, asyncio.Lock] = WeakKeyDictionary()

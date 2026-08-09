@@ -94,6 +94,7 @@ def permit(candidate: ContributionPublishCandidate) -> PublishPermit:
         repo=candidate.repo,
         base_sha=candidate.base_sha,
         patch_sha256=candidate.patch_sha256,
+        publish_sha256=candidate.publish_sha256,
         verification_id="verification-123",
         review_id="review-123",
         approved_side_effects=frozenset({PublishSideEffect.CREATE_PR}),
@@ -255,6 +256,69 @@ def test_candidate_hash_binds_change_order_category_and_delete_flag(
     )
 
 
+def test_candidate_publish_hash_binds_all_github_side_effect_content(
+    contribution: Contribution,
+    target_repo: Repository,
+) -> None:
+    original = ContributionPublishCandidate(
+        contribution,
+        target_repo,
+        BASE_SHA,
+        guidelines=RepoGuidelines(pr_template="## Summary\n"),
+        closes_issue=17,
+    )
+    variants: list[ContributionPublishCandidate] = []
+
+    for field_name, value in (
+        ("title", "fix: unreviewed title"),
+        ("description", "Unreviewed PR description"),
+        ("commit_message", "fix: unreviewed commit"),
+        ("branch_name", "fix/unreviewed-branch"),
+    ):
+        changed = contribution.model_copy(deep=True)
+        setattr(changed, field_name, value)
+        variants.append(
+            ContributionPublishCandidate(
+                changed,
+                target_repo,
+                BASE_SHA,
+                guidelines=RepoGuidelines(pr_template="## Summary\n"),
+                closes_issue=17,
+            )
+        )
+
+    changed_finding = contribution.model_copy(deep=True)
+    changed_finding.finding.description = "Unreviewed linked issue body"
+    variants.extend(
+        [
+            ContributionPublishCandidate(
+                changed_finding,
+                target_repo,
+                BASE_SHA,
+                guidelines=RepoGuidelines(pr_template="## Summary\n"),
+                closes_issue=17,
+            ),
+            ContributionPublishCandidate(
+                contribution,
+                target_repo,
+                BASE_SHA,
+                guidelines=RepoGuidelines(pr_template="## Unreviewed template\n"),
+                closes_issue=17,
+            ),
+            ContributionPublishCandidate(
+                contribution,
+                target_repo,
+                BASE_SHA,
+                guidelines=RepoGuidelines(pr_template="## Summary\n"),
+                closes_issue=18,
+            ),
+        ]
+    )
+
+    assert all(variant.patch_sha256 == original.patch_sha256 for variant in variants)
+    assert all(variant.publish_sha256 != original.publish_sha256 for variant in variants)
+
+
 def test_candidate_does_not_accept_a_caller_asserted_patch_hash(
     contribution: Contribution,
     target_repo: Repository,
@@ -336,6 +400,28 @@ async def test_valid_permit_publishes_candidate_at_bound_base_sha(
         github.create_pull_request,
     ):
         assert isinstance(write.await_args.kwargs["authority"], GitHubWriteAuthority)
+
+
+@pytest.mark.asyncio
+async def test_permit_rejects_candidate_with_unreviewed_publish_metadata(
+    github: AsyncMock,
+    permit: PublishPermit,
+    candidate: ContributionPublishCandidate,
+) -> None:
+    changed = candidate.contribution
+    changed.title = "fix: unreviewed title"
+    unreviewed = ContributionPublishCandidate(
+        changed,
+        candidate.target_repo,
+        candidate.base_sha,
+        guidelines=candidate.guidelines,
+        closes_issue=candidate.closes_issue,
+    )
+    assert unreviewed.patch_sha256 == candidate.patch_sha256
+    assert unreviewed.publish_sha256 != candidate.publish_sha256
+
+    with pytest.raises(PublishPermitError, match="publish hash"):
+        await make_publisher(github).publish(permit, unreviewed)
 
 
 @pytest.mark.asyncio
@@ -525,6 +611,7 @@ async def test_permit_expiring_during_pre_write_reads_blocks_first_mutation(
         ("repo", "acme/other", "repo"),
         ("base_sha", "d" * 40, "base SHA"),
         ("patch_sha256", "e" * 64, "patch hash"),
+        ("publish_sha256", "f" * 64, "publish hash"),
     ],
 )
 @pytest.mark.asyncio
@@ -541,6 +628,7 @@ async def test_candidate_bindings_are_revalidated_after_pre_write_reads(
         target_repo=candidate.target_repo,
         base_sha=candidate.base_sha,
         patch_sha256=candidate.patch_sha256,
+        publish_sha256=candidate.publish_sha256,
         repo=candidate.repo,
         guidelines=candidate.guidelines,
         closes_issue=candidate.closes_issue,
@@ -641,7 +729,10 @@ async def test_generic_review_id_cannot_approve_unreviewed_issue_creation(
         BASE_SHA,
         guidelines=RepoGuidelines(requires_issue_link=True),
     )
-    pr_only_permit = _permit_with_side_effects(permit, "CREATE_PR")
+    pr_only_permit = replace(
+        _permit_with_side_effects(permit, "CREATE_PR"),
+        publish_sha256=candidate.publish_sha256,
+    )
     publisher = make_publisher(
         github,
         policy_engine(
@@ -673,7 +764,10 @@ async def test_exact_issue_and_pr_review_approvals_allow_issue_then_pr(
         BASE_SHA,
         guidelines=RepoGuidelines(requires_issue_link=True),
     )
-    approved_permit = _permit_with_side_effects(permit, "CREATE_PR", "CREATE_ISSUE")
+    approved_permit = replace(
+        _permit_with_side_effects(permit, "CREATE_PR", "CREATE_ISSUE"),
+        publish_sha256=candidate.publish_sha256,
+    )
     github.create_issue.return_value = {"number": 41}
     publisher = make_publisher(
         github,

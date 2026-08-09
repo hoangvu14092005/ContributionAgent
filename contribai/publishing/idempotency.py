@@ -25,6 +25,7 @@ class IdempotencyKey:
     repo: str
     base_sha: str
     patch_sha256: str
+    publish_sha256: str = ""
 
     @property
     def storage_key(self) -> str:
@@ -32,6 +33,7 @@ class IdempotencyKey:
             {
                 "base_sha": self.base_sha,
                 "patch_sha256": self.patch_sha256,
+                "publish_sha256": self.publish_sha256,
                 "repo": self.repo,
                 "work_id": self.work_id,
             },
@@ -205,6 +207,7 @@ class SQLiteIdempotencyStore(Generic[T]):
             {
                 "base_sha": key.base_sha,
                 "patch_sha256": key.patch_sha256,
+                "publish_sha256": key.publish_sha256,
                 "repo": key.repo,
                 "work_id": key.work_id,
             },
