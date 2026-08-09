@@ -20,7 +20,6 @@ from contribai.core.middleware import build_default_chain
 from contribai.core.models import (
     AnalysisResult,
     DiscoveryCriteria,
-    Issue,
     PRResult,
     Repository,
 )
@@ -30,87 +29,22 @@ from contribai.github.discovery import RepoDiscovery
 from contribai.github.guidelines import fetch_repo_guidelines
 from contribai.issues.solver import IssueSolver
 from contribai.llm.provider import create_llm_provider
-from contribai.opportunity.engine import OpportunityEngine, OpportunitySource
 from contribai.orchestrator.memory import Memory
-from contribai.orchestrator.review_gate import HumanReviewer, ReviewGate
+from contribai.orchestrator.review_gate import HumanReviewer
 from contribai.pr.manager import PRManager
-from contribai.publishing.permit import PublishSideEffect
 from contribai.tools.protocol import create_default_tools
 
 logger = logging.getLogger(__name__)
 
-# Files that should NOT be modified/created by ContribAI
-# These are meta/governance files that projects manage themselves
-PROTECTED_META_FILES = {
-    "CONTRIBUTING.md",
-    ".github/CONTRIBUTING.md",
-    "docs/CONTRIBUTING.md",
-    "CODE_OF_CONDUCT.md",
-    ".github/CODE_OF_CONDUCT.md",
-    "LICENSE",
-    "LICENSE.md",
-    "LICENSE.txt",
-    ".github/FUNDING.yml",
-    ".github/SECURITY.md",
-    "SECURITY.md",
-    ".github/CODEOWNERS",
-    ".all-contributorsrc",
-}
-
-# File extensions to skip — doc/config-only changes are low-value
-# Only code files should be modified
-SKIP_EXTENSIONS = {
-    ".md",
-    ".txt",
-    ".rst",
-    ".yml",
-    ".yaml",
-    ".toml",
-    ".cfg",
-    ".ini",
-    ".json",
-}
-
-# Directories to skip — changes in these are low-value and often rejected
-# by maintainers. Example code, docs, tests, and fixtures are not worth PRing.
-SKIP_DIRECTORIES = {
-    "examples",
-    "example",
-    "samples",
-    "sample",
-    "demos",
-    "demo",
-    "docs",
-    "doc",
-    "test",
-    "tests",
-    "testing",
-    "test_data",
-    "testdata",
-    "fixtures",
-    "benchmarks",
-    "benchmark",
-    "__pycache__",
-    "vendor",
-    "third_party",
-    "third-party",
-    "node_modules",
-}
-
-
-def _titles_similar(title_a: str, title_b: str) -> bool:
-    """Check if two finding/PR titles are similar enough to be duplicates.
-
-    Uses keyword overlap: if >50% of significant words match, consider similar.
-    """
-    stop_words = {"a", "an", "the", "in", "on", "of", "for", "to", "and", "or", "is"}
-    words_a = {w for w in title_a.lower().split() if w not in stop_words and len(w) > 2}
-    words_b = {w for w in title_b.lower().split() if w not in stop_words and len(w) > 2}
-    if not words_a or not words_b:
-        return False
-    overlap = len(words_a & words_b)
-    smaller = min(len(words_a), len(words_b))
-    return overlap / smaller > 0.5
+# Layer C: constants and `_titles_similar` moved to
+# :mod:`contribai.orchestrator.pipeline_constants`. They are re-imported
+# below for back-compat with tests that import them from this module.
+from contribai.orchestrator.pipeline_constants import (  # noqa: E402,F401
+    PROTECTED_META_FILES,
+    SKIP_DIRECTORIES,
+    SKIP_EXTENSIONS,
+    _titles_similar,
+)
 
 
 @dataclass
@@ -141,10 +75,8 @@ class ContribPipeline:
         self._agent_registry = None
         self._tool_registry = None
         self._reviewer: HumanReviewer | None = None
-        self._review_gate: ReviewGate | None = None
         self._event_bus: EventBus = EventBus()
         self._repo_intel: RepoIntelligence | None = None
-        self._opportunity_engine = OpportunityEngine()
 
     async def _init_components(self):
         """Initialize all pipeline components."""
@@ -167,11 +99,23 @@ class ContribPipeline:
         await self._memory.init()
 
         # Analyzer
+        # ── Layer B: discover plugins (AnalyzerPlugin instances) and merge
+        # them into the analyzer. ``discover()`` is a no-op the second time
+        # around; we call it explicitly so the log shows the loaded count.
+        from contribai.plugins import discover as discover_plugins
+
+        plugin_registry = discover_plugins()
         self._analyzer = CodeAnalyzer(
             llm=self._llm,
             github=self._github,
             config=self.config.analysis,
+            plugin_analyzers=plugin_registry.analyzers,
         )
+        if plugin_registry.analyzers:
+            logger.info(
+                "🔌 Merged %d plugin analyzer(s) into pipeline",
+                len(plugin_registry.analyzers),
+            )
 
         # Generator — now with memory for repo_preferences
         self._generator = ContributionGenerator(
@@ -225,10 +169,6 @@ class ContribPipeline:
         else:
             self._reviewer = HumanReviewer(auto_approve=True)
             logger.debug("Human review gate: disabled (auto-approve)")
-        self._review_gate = ReviewGate(
-            self._reviewer,
-            explicit_human_review=self.config.pipeline.human_review,
-        )
 
         # Event bus + file logger for observability
         from pathlib import Path
@@ -701,1067 +641,124 @@ class ContribPipeline:
         finally:
             await self._cleanup()
 
-    async def _review_and_publish(
-        self,
-        contribution,
-        finding,
-        repo: Repository,
-        guidelines,
-        *,
-        closes_issue: int | None = None,
-    ) -> PRResult | None:
-        """Apply the single review boundary before the legacy publish seam.
-
-        ``PRManager.create_pr`` remains fail-closed in production until a later
-        control-plane task supplies a permit-bearing ``GitHubPublisher`` command.
-        """
-        planned_side_effects = [PublishSideEffect.CREATE_PR]
-        if closes_issue is None and guidelines.requires_issue_link:
-            planned_side_effects.insert(0, PublishSideEffect.CREATE_ISSUE)
-
-        decision = await self._review_gate.review(
-            contribution,
-            finding,
-            repo.full_name,
-            planned_side_effects=tuple(planned_side_effects),
-        )
-        if decision.approved is not True:
-            logger.info(
-                "Review did not approve %s (decision=%s)",
-                contribution.title,
-                decision.action,
-            )
-            return None
-
-        return await self._pr_manager.create_pr(
-            contribution,
-            repo,
-            guidelines=guidelines,
-            closes_issue=closes_issue,
-        )
-
     # ── Internal ───────────────────────────────────────────────────────────
 
+    def _build_pipeline_context(self) -> "PipelineContext":
+        """Freeze the live collaborators into a :class:`PipelineContext`.
+
+        The :class:`Pipeline` conductor treats ``ctx`` as immutable and
+        threads it through every step.
+        """
+        from contribai.orchestrator.pipeline_core import PipelineContext
+
+        return PipelineContext(
+            github=self._github,
+            llm=self._llm,
+            memory=self._memory,
+            analyzer=self._analyzer,
+            generator=self._generator,
+            pr_manager=self._pr_manager,
+            reviewer=self._reviewer,
+            repo_intel=self._repo_intel,
+            event_bus=self._event_bus,
+            config=self.config,
+        )
+
     async def _process_repo(
-        self, repo: Repository, dry_run: bool, max_prs: int = 5
+        self,
+        repo: Repository,
+        dry_run: bool,
+        max_prs: int = 5,
     ) -> PipelineResult:
-        """Process a single repository through the full pipeline."""
-        result = PipelineResult()
+        """Process a single repository through the analysis pipeline (Layer C).
+
+        Thin orchestrator: builds :class:`PipelineState`, runs the 5-step
+        analysis pipeline, returns ``state.result``.
+        """
+        from contribai.orchestrator.pipeline_core import Pipeline, PipelineState
+        from contribai.orchestrator.steps import (
+            generate_contribution_step,
+            load_repo_context_step,
+            run_analysis_step,
+            submit_pr_step,
+            validate_findings_step,
+        )
+
         logger.info("=" * 60)
         logger.info("📦 Processing: %s", repo.full_name)
 
-        # ── Auto-load working memory (AgentScope static_control pattern) ──
-        cached_context = await self._memory.get_context(repo.full_name, "analysis_summary")
-        if cached_context:
-            logger.info(
-                "💾 Loaded cached context for %s (%d chars)",
-                repo.full_name,
-                len(cached_context),
-            )
-            await self._event_bus.emit(
-                Event(
-                    type=EventType.MEMORY_RECALL,
-                    source="pipeline._process_repo",
-                    data={"repo": repo.full_name, "key": "analysis_summary"},
-                )
-            )
+        state = PipelineState(repo=repo, dry_run=dry_run, max_prs=max_prs)
+        ctx = self._build_pipeline_context()
 
-        # Check AI policy — skip repos that ban AI-generated PRs
-        if await self._check_ai_policy(repo):
-            logger.warning(
-                "🚫 %s has an AI policy that bans AI PRs, skipping.",
-                repo.full_name,
-            )
-            result.repos_analyzed = 1
-            return result
-
-        # Check PR permissions — skip repos that restrict PRs to collaborators
-        if await self._check_pr_permissions(repo):
-            logger.warning(
-                "%s restricts PRs to collaborators only, skipping.",
-                repo.full_name,
-            )
-            result.repos_analyzed = 1
-            return result
-
-        # Fetch repo guidelines (CONTRIBUTING.md, PR template)
-        guidelines = await fetch_repo_guidelines(self._github, repo.owner, repo.name)
-        if guidelines.has_guidelines:
-            logger.info(
-                "Repo guidelines: commit=%s, %d template sections",
-                guidelines.commit_format,
-                len(guidelines.required_sections),
-            )
-
-        # ── v4.0: Repo Intelligence ──────────────────────────────────────
-        repo_profile: RepoProfile | None = None
-        try:
-            repo_profile = await self._repo_intel.profile(repo.owner, repo.name)
-        except Exception as e:
-            logger.debug("Repo intelligence failed for %s: %s", repo.full_name, e)
-
-        # ── v4.0: Smart Dedup — inject PR history into analysis context ──
-        pr_history_context = ""
-        past_prs = await self._memory.get_repo_prs(repo.full_name)
-        if past_prs:
-            pr_lines = []
-            for pr in past_prs[:10]:
-                pr_lines.append(f"  - [{pr.get('status', '?')}] {pr.get('title', '?')}")
-            pr_history_context = (
-                "\n\nPREVIOUSLY SUBMITTED PRs (DO NOT repeat these):\n" + "\n".join(pr_lines)
-            )
-            logger.info(
-                "🔁 Injected %d past PRs into analysis context",
-                len(past_prs),
-            )
-
-        # Inject repo intel + PR history into analyzer's context
-        if repo_profile or pr_history_context:
-            extra_context = ""
-            if repo_profile:
-                extra_context += "\n\n" + repo_profile.to_prompt_context()
-            if pr_history_context:
-                extra_context += pr_history_context
-            # Store as working memory for the analyzer to pick up
-            await self._memory.store_context(
-                repo.full_name,
-                "repo_intelligence",
-                extra_context,
-                language=repo.language or "",
-                ttl_hours=48.0,
-            )
-
-        # Analyze — set task context for model routing
-        logger.info("🔬 Analyzing code...")
-        self._set_task("analysis")
-        await self._event_bus.emit(
-            Event(
-                type=EventType.ANALYSIS_START,
-                source="pipeline._process_repo",
-                data={"repo": repo.full_name},
-            )
+        analysis_pipeline = Pipeline(
+            [
+                load_repo_context_step,
+                run_analysis_step,
+                validate_findings_step,
+                generate_contribution_step,
+                submit_pr_step,
+            ],
+            label="analysis",
         )
-        analysis = await self._analyzer.analyze(repo)
-        await self._event_bus.emit(
-            Event(
-                type=EventType.ANALYSIS_COMPLETE,
-                source="pipeline._process_repo",
-                data={"repo": repo.full_name, "findings": len(analysis.findings)},
-            )
-        )
-        result.findings_total = len(analysis.findings)
-
-        await self._memory.record_analysis(
-            repo.full_name,
-            repo.language or "unknown",
-            repo.stars,
-            len(analysis.findings),
-        )
-
-        if not analysis.findings:
-            logger.info("No findings for %s", repo.full_name)
-            return result
-
-        # ── Auto-save working memory (AgentScope static_control pattern) ──
-        try:
-            summary = ContextCompressor.summarize_findings_compact(analysis.findings)
-            await self._memory.store_context(
-                repo.full_name,
-                "analysis_summary",
-                summary,
-                language=repo.language or "",
-                ttl_hours=72.0,
-            )
-            logger.info(
-                "💾 Saved analysis context for %s (%d findings)",
-                repo.full_name,
-                len(analysis.findings),
-            )
-            await self._event_bus.emit(
-                Event(
-                    type=EventType.MEMORY_STORE,
-                    source="pipeline._process_repo",
-                    data={"repo": repo.full_name, "key": "analysis_summary"},
-                )
-            )
-        except Exception as e:
-            logger.debug("Failed to save context: %s", e)
-
-        # --- Early finding filter (pre-generation) ---
-        # Filter out findings that target non-code files (blocked by SKIP_EXTENSIONS)
-        # or are irrelevant to the project type, BEFORE wasting LLM calls.
-        pre_filter_count = len(analysis.findings)
-        filtered = []
-        for f in analysis.findings:
-            fp = f.file_path or ""
-            ext = "." + fp.rsplit(".", 1)[-1].lower() if "." in fp else ""
-
-            # Skip findings on non-code files (would be blocked at commit anyway)
-            if ext in SKIP_EXTENSIONS:
-                logger.debug("⏭️ Pre-filter: skip non-code file %s", fp)
-                continue
-
-            # Skip findings in low-value directories (examples, docs, tests, etc.)
-            path_parts = fp.lower().replace("\\", "/").split("/")
-            if any(part in SKIP_DIRECTORIES for part in path_parts):
-                logger.debug("⏭️ Pre-filter: skip low-value directory %s", fp)
-                continue
-
-            # Skip findings on protected meta files
-            basename = fp.rsplit("/", 1)[-1] if "/" in fp else fp
-            if basename.upper() in PROTECTED_META_FILES:
-                logger.debug("⏭️ Pre-filter: skip protected file %s", fp)
-                continue
-
-            filtered.append(f)
-
-        if len(filtered) < pre_filter_count:
-            logger.info(
-                "🔍 Pre-filter: %d → %d findings (removed %d non-code targets)",
-                pre_filter_count,
-                len(filtered),
-                pre_filter_count - len(filtered),
-            )
-            analysis.findings = filtered
-
-        if not analysis.findings:
-            logger.info("All findings filtered (non-code targets) for %s", repo.full_name)
-            return result
-
-        logger.info(
-            "Found %d issues (analyzed %d files in %.1fs)",
-            len(analysis.findings),
-            analysis.analyzed_files,
-            analysis.analysis_duration_sec,
-        )
-
-        # Build context for generation — fetch files for ALL findings we'll process
-        file_tree = await self._github.get_file_tree(repo.owner, repo.name)
-        relevant_files: dict[str, str] = {}
-        # Deduplicate file paths across all findings we'll process
-        file_paths_to_fetch = []
-        for finding in analysis.top_findings[:max_prs]:
-            if finding.file_path and finding.file_path not in relevant_files:
-                file_paths_to_fetch.append(finding.file_path)
-
-        for fpath in file_paths_to_fetch:
-            try:
-                content = await self._github.get_file_content(repo.owner, repo.name, fpath)
-                relevant_files[fpath] = content
-            except Exception:
-                logger.debug("Could not fetch %s", fpath)
-
-        logger.info(
-            "Fetched %d/%d unique files for code gen",
-            len(relevant_files),
-            len(file_paths_to_fetch),
-        )
-
-        from contribai.core.models import RepoContext
-
-        context = RepoContext(
-            repo=repo,
-            file_tree=file_tree,
-            relevant_files=relevant_files,
-        )
-
-        # Filter out findings that overlap with previously submitted PRs
-        # Check BOTH local memory AND GitHub API for existing PRs
-        past_titles_lower: set[str] = set()
-        past_file_paths: set[str] = set()
-
-        # 1) Local memory
-        past_prs = await self._memory.get_repo_prs(repo.full_name)
-        for pr in past_prs:
-            past_titles_lower.add(pr.get("title", "").lower())
-
-        # 2) GitHub API — fetch recent PRs (all states) to catch external PRs too
-        try:
-            github_prs = await self._github.list_pull_requests(
-                repo.owner, repo.name, state="all", per_page=50
-            )
-            for gpr in github_prs:
-                past_titles_lower.add(gpr.get("title", "").lower())
-                # Extract file paths from bot branch names such as fix/, docs/, and feat/.
-                head = gpr.get("head", {})
-                branch_label = head.get("label", "")
-                # Check if branch matches bot patterns
-                bot_patterns = ["fix/", "docs/", "feat/", "perf/", "refactor/", "improve/"]
-                if any(pattern in branch_label for pattern in bot_patterns):
-                    past_titles_lower.add(gpr.get("title", "").lower())
-                # Track all recently-targeted file info from PR body
-                body = gpr.get("body", "") or ""
-                # Extract file paths mentioned in PR bodies (e.g. `src/foo/bar.ts`)
-                import re
-
-                for match in re.findall(r"`(src/[^\s`]+\.\w+)`", body):
-                    past_file_paths.add(match)
-        except Exception:
-            logger.debug("Could not fetch GitHub PRs for dedup, using memory only")
-
-        original_count = len(analysis.top_findings[:max_prs])
-        filtered_findings = []
-        for finding in analysis.top_findings[:max_prs]:
-            title_lower = finding.title.lower()
-            # Check title similarity
-            is_title_dup = any(_titles_similar(title_lower, pt) for pt in past_titles_lower)
-            # Check if same file was already targeted
-            is_file_dup = finding.file_path in past_file_paths if finding.file_path else False
-
-            if is_title_dup:
-                logger.info(
-                    "⏭️ Skipping duplicate finding: %s (similar PR exists)",
-                    finding.title,
-                )
-                continue
-            if is_file_dup:
-                logger.info(
-                    "⏭️ Skipping finding on already-targeted file: %s → %s",
-                    finding.title,
-                    finding.file_path,
-                )
-                continue
-            filtered_findings.append(finding)
-
-        if len(filtered_findings) < original_count:
-            logger.info(
-                "🔁 Filtered %d duplicate findings (%d remaining)",
-                original_count - len(filtered_findings),
-                len(filtered_findings),
-            )
-
-        if not filtered_findings:
-            logger.info("No new findings after duplicate filter")
-            result.repos_analyzed = 1
-            return result
-
-        # Validate findings against full file content to filter false positives
-        validated_findings = await self._validate_findings(filtered_findings, relevant_files)
-
-        # Configurable limit per repo (default 3, was hardcoded 2)
-        max_findings_per_repo = getattr(self.config.pipeline, "max_findings_per_repo", 3)
-        if len(validated_findings) > max_findings_per_repo:
-            logger.info(
-                "📉 Limiting to %d findings per repo (had %d)",
-                max_findings_per_repo,
-                len(validated_findings),
-            )
-            validated_findings = validated_findings[:max_findings_per_repo]
-
-        logger.info(
-            "🔎 Validated %d/%d findings (filtered %d false positives)",
-            len(validated_findings),
-            min(len(analysis.top_findings), max_prs),
-            min(len(analysis.top_findings), max_prs) - len(validated_findings),
-        )
-
-        # Generate contributions for validated findings
-        for finding in validated_findings:
-            logger.info("Generating fix for: %s", finding.title)
-            self._set_task("code_gen")
-            await self._event_bus.emit(
-                Event(
-                    type=EventType.GENERATION_START,
-                    source="pipeline._process_repo",
-                    data={"repo": repo.full_name, "finding": finding.title},
-                )
-            )
-            contribution = await self._generator.generate(finding, context, guidelines=guidelines)
-            await self._event_bus.emit(
-                Event(
-                    type=EventType.GENERATION_COMPLETE,
-                    source="pipeline._process_repo",
-                    data={
-                        "repo": repo.full_name,
-                        "finding": finding.title,
-                        "success": contribution is not None,
-                    },
-                )
-            )
-
-            if not contribution:
-                continue
-
-            result.contributions_generated += 1
-
-            if dry_run:
-                logger.info("🏃 [DRY RUN] Would create PR: %s", contribution.title)
-                continue
-
-            # Create PR
-            try:
-                logger.info("📤 Creating PR...")
-                pr_result = await self._review_and_publish(
-                    contribution,
-                    finding,
-                    repo,
-                    guidelines,
-                )
-                if pr_result is None:
-                    continue
-                result.prs_created += 1
-                result.prs.append(pr_result)
-                await self._event_bus.emit(
-                    Event(
-                        type=EventType.PR_CREATED,
-                        source="pipeline._process_repo",
-                        data={
-                            "repo": repo.full_name,
-                            "pr_url": pr_result.pr_url,
-                            "title": contribution.title,
-                        },
-                    )
-                )
-                # Record in memory
-                await self._memory.record_pr(
-                    repo=repo.full_name,
-                    pr_number=pr_result.pr_number,
-                    pr_url=pr_result.pr_url,
-                    title=contribution.title,
-                    pr_type=contribution.contribution_type.value,
-                    branch=pr_result.branch_name,
-                    fork=pr_result.fork_full_name,
-                )
-
-                # 5. Post-PR compliance check & auto-fix
-                try:
-                    logger.info("🔍 Checking PR compliance...")
-                    await self._pr_manager.check_compliance_and_fix(
-                        pr_result,
-                        contribution,
-                        guidelines=guidelines,
-                    )
-                except Exception as e:
-                    logger.warning("Compliance check failed: %s", e)
-
-                # 6. Wait for CI and auto-close if tests fail
-                try:
-                    await self._check_ci_and_close_if_failed(pr_result, repo)
-                except Exception as e:
-                    logger.warning("CI check failed: %s", e)
-            except Exception as e:
-                error = f"PR creation failed for {finding.title}: {e}"
-                logger.error(error)
-                result.errors.append(error)
-                await self._event_bus.emit(
-                    Event(
-                        type=EventType.PIPELINE_ERROR,
-                        source="pipeline._process_repo",
-                        data={"repo": repo.full_name, "error": error},
-                    )
-                )
-
-        result.repos_analyzed = 1
-        return result
+        return (await analysis_pipeline.run(state, ctx)).result
 
     async def _process_repo_issues(
-        self, repo: Repository, dry_run: bool, max_prs: int = 3
+        self,
+        repo: Repository,
+        dry_run: bool,
+        max_prs: int = 3,
     ) -> PipelineResult:
-        """Process a repo by solving its open Issues.
+        """Process a repo by solving its open Issues (Layer C).
 
-        v2.0.0: Issue-driven mode. Fetches solvable issues, uses
-        solve_issue_deep() to plan multi-file changes, generates
-        contributions, and creates PRs that close issues.
+        Issue-mode pipeline reuses ``load_repo_context_step``,
+        ``generate_contribution_step``, and ``submit_pr_step`` (3/5). The
+        two issue-specific steps are :func:`solve_issue_step` and
+        :func:`validate_issue_findings_step`.
         """
-        result = PipelineResult()
+        from contribai.orchestrator.pipeline_core import Pipeline, PipelineState
+        from contribai.orchestrator.steps import (
+            generate_contribution_step,
+            load_repo_context_step,
+            solve_issue_step,
+            submit_pr_step,
+            validate_issue_findings_step,
+        )
+
         logger.info("📋 Looking for solvable issues in %s...", repo.full_name)
 
-        # Check AI policy first
-        if await self._check_ai_policy(repo):
-            logger.warning(
-                "🚫 %s bans AI PRs, skipping issue solving.",
-                repo.full_name,
-            )
-            return result
+        state = PipelineState(repo=repo, dry_run=dry_run, max_prs=max_prs)
+        ctx = self._build_pipeline_context()
 
-        # Check PR permissions — skip repos that restrict PRs to collaborators
-        if await self._check_pr_permissions(repo):
-            logger.warning(
-                "%s restricts PRs to collaborators, skipping issue solving.",
-                repo.full_name,
-            )
-            return result
-
-        # Initialize issue solver
-        solver = IssueSolver(llm=self._llm, github=self._github)
-
-        # Fetch solvable issues, then rank and persist their read-only opportunity evidence.
-        issues = await solver.fetch_solvable_issues(repo, max_issues=max_prs, max_complexity=3)
-        issues = await self._rank_issue_opportunities(repo, issues, max_prs)
-
-        if not issues:
-            logger.info("No solvable issues found in %s", repo.full_name)
-            return result
-
-        # Fetch repo guidelines
-        guidelines = await fetch_repo_guidelines(self._github, repo.owner, repo.name)
-
-        # Build repo context with more files for deeper understanding
-        file_tree = await self._github.get_file_tree(repo.owner, repo.name)
-        relevant_files: dict[str, str] = {}
-
-        # Fetch key files for context (README, main modules, etc.)
-        key_files = self._identify_key_files(file_tree, repo)
-        for fpath in key_files[:10]:
-            try:
-                content = await self._github.get_file_content(repo.owner, repo.name, fpath)
-                relevant_files[fpath] = content
-            except Exception:
-                pass
-
-        from contribai.core.models import RepoContext
-
-        context = RepoContext(
-            repo=repo,
-            file_tree=file_tree,
-            relevant_files=relevant_files,
+        issue_pipeline = Pipeline(
+            [
+                load_repo_context_step,
+                solve_issue_step,
+                validate_issue_findings_step,
+                generate_contribution_step,
+                submit_pr_step,
+            ],
+            label="issue",
         )
-
-        # Process each issue
-        for issue in issues:
-            if result.prs_created >= max_prs:
-                break
-
-            logger.info(
-                "🧠 Solving issue #%d: %s",
-                issue.number,
-                issue.title,
-            )
-
-            # Deep solve → multi-file findings
-            self._set_task("analysis")
-            findings = await solver.solve_issue_deep(issue, repo, context)
-
-            # Filter out findings that only touch non-code files
-            # (docs, configs, meta files — low-value changes)
-            def _is_code_file(path: str | None) -> bool:
-                if not path:
-                    return True  # no path → keep it
-                import os
-
-                _, ext = os.path.splitext(path.lower())
-                if ext in SKIP_EXTENSIONS:
-                    return False
-                # Skip low-value directories
-                path_parts = path.lower().replace("\\", "/").split("/")
-                if any(part in SKIP_DIRECTORIES for part in path_parts):
-                    return False
-                return path.lower() not in {p.lower() for p in PROTECTED_META_FILES}
-
-            findings = [f for f in findings if _is_code_file(f.file_path)]
-
-            result.findings_total += len(findings)
-
-            if not findings:
-                logger.info("Could not solve issue #%d", issue.number)
-                continue
-
-            # Fetch file contents for each finding
-            for finding in findings:
-                if finding.file_path and finding.file_path not in relevant_files:
-                    try:
-                        content = await self._github.get_file_content(
-                            repo.owner, repo.name, finding.file_path
-                        )
-                        relevant_files[finding.file_path] = content
-                        context.relevant_files[finding.file_path] = content
-                    except Exception:
-                        pass
-
-            # Generate contributions — first finding is the primary one
-            # The generator already handles multi-file via cross-file matching
-            primary = findings[0]
-            logger.info(
-                "Generating fix for issue #%d (%d files)...",
-                issue.number,
-                len(findings),
-            )
-
-            self._set_task("code_gen")
-            contribution = await self._generator.generate(primary, context, guidelines=guidelines)
-
-            if not contribution:
-                logger.warning(
-                    "Failed to generate contribution for issue #%d",
-                    issue.number,
-                )
-                continue
-
-            result.contributions_generated += 1
-
-            if dry_run:
-                logger.info(
-                    "[DRY RUN] Would create PR for issue #%d: %s",
-                    issue.number,
-                    contribution.title,
-                )
-                continue
-
-            # Create PR with "Closes #N" in body
-            try:
-                logger.info("📤 Creating PR for issue #%d...", issue.number)
-                pr_result = await self._review_and_publish(
-                    contribution,
-                    primary,
-                    repo,
-                    guidelines,
-                    closes_issue=issue.number,
-                )
-                if pr_result is None:
-                    continue
-                result.prs_created += 1
-                result.prs.append(pr_result)
-
-                await self._memory.record_pr(
-                    repo=repo.full_name,
-                    pr_number=pr_result.pr_number,
-                    pr_url=pr_result.pr_url,
-                    title=contribution.title,
-                    pr_type=contribution.contribution_type.value,
-                    branch=pr_result.branch_name,
-                    fork=pr_result.fork_full_name,
-                )
-
-                # Post-PR compliance
-                try:
-                    await self._pr_manager.check_compliance_and_fix(
-                        pr_result, contribution, guidelines=guidelines
-                    )
-                except Exception as e:
-                    logger.warning("Compliance check failed: %s", e)
-
-                # CI check
-                try:
-                    await self._check_ci_and_close_if_failed(pr_result, repo)
-                except Exception as e:
-                    logger.warning("CI check failed: %s", e)
-
-            except Exception as e:
-                error = f"PR creation failed for issue #{issue.number}: {e}"
-                logger.error(error)
-                result.errors.append(error)
-
-        result.repos_analyzed = 1
-        return result
-
-    async def _rank_issue_opportunities(
-        self, repo: Repository, issues: list[Issue], max_candidates: int
-    ) -> list[Issue]:
-        """Rank issue candidates without crossing into the write pipeline."""
-        profile: RepoProfile | None = None
-        if self._repo_intel is not None:
-            try:
-                profile = await self._repo_intel.profile(repo.owner, repo.name)
-            except Exception as e:
-                logger.debug("Opportunity repo profile failed for %s: %s", repo.full_name, e)
-
-        outcomes = []
-        get_outcomes = getattr(self._memory, "get_contribution_outcomes", None)
-        if get_outcomes is not None:
-            try:
-                loaded_outcomes = await get_outcomes(repo.full_name)
-                if isinstance(loaded_outcomes, list):
-                    outcomes = loaded_outcomes
-            except Exception as e:
-                logger.debug(
-                    "Opportunity outcome learning unavailable for %s: %s", repo.full_name, e
-                )
-
-        candidates = self._opportunity_engine.rank(
-            repo,
-            issues=issues,
-            profile=profile,
-            max_candidates=max_candidates,
-            outcomes=outcomes,
-        )
-        issue_candidates = [
-            candidate for candidate in candidates if candidate.source is OpportunitySource.ISSUE
-        ]
-
-        record_score = getattr(self._memory, "record_opportunity_score", None)
-        if record_score is not None:
-            for candidate in issue_candidates:
-                try:
-                    await record_score(candidate)
-                except Exception as e:
-                    logger.debug(
-                        "Could not persist opportunity score for %s #%s: %s",
-                        repo.full_name,
-                        candidate.issue_number,
-                        e,
-                    )
-
-        return [
-            candidate.task for candidate in issue_candidates if isinstance(candidate.task, Issue)
-        ]
+        return (await issue_pipeline.run(state, ctx)).result
 
     def _identify_key_files(self, file_tree: list, repo: Repository) -> list[str]:
-        """Identify key files in a repo for building context.
+        """Back-compat shim — calls :func:`contribai.orchestrator.steps.identify_key_files`.
 
-        Prioritizes: README, main entry points, config files, core modules.
+        Kept so that ``tests/unit/test_pipeline_v2.py::TestIdentifyKeyFiles``
+        (which calls ``sample_pipeline._identify_key_files(...)``) keeps
+        passing without modification.
         """
-        priority_patterns = [
-            "README.md",
-            "CONTRIBUTING.md",
-            "setup.py",
-            "pyproject.toml",
-            "package.json",
-            "Cargo.toml",
-            "go.mod",
-        ]
+        from contribai.orchestrator.steps import identify_key_files
 
-        # Collect all blob paths
-        all_files = [f.path for f in file_tree if f.type == "blob"]
-
-        key_files: list[str] = []
-
-        # Add priority files first
-        for pattern in priority_patterns:
-            for fpath in all_files:
-                if fpath.endswith(pattern) and fpath not in key_files:
-                    key_files.append(fpath)
-                    break
-
-        # Add main entry points based on language
-        lang = (repo.language or "").lower()
-        entry_patterns = {
-            "python": ["__init__.py", "main.py", "app.py", "cli.py"],
-            "javascript": ["index.js", "app.js", "server.js"],
-            "typescript": ["index.ts", "app.ts", "main.ts"],
-            "go": ["main.go", "cmd/main.go"],
-            "rust": ["main.rs", "lib.rs"],
-        }
-
-        for pat in entry_patterns.get(lang, []):
-            for fpath in all_files:
-                if fpath.endswith(pat) and fpath not in key_files:
-                    key_files.append(fpath)
-
-        # Add source files from common directories
-        src_dirs = ["src/", "lib/", "app/", "pkg/", "internal/"]
-        for fpath in all_files:
-            if len(key_files) >= 15:
-                break
-            if any(fpath.startswith(d) for d in src_dirs) and fpath not in key_files:
-                key_files.append(fpath)
-
-        return key_files[:15]
-
-    async def _validate_findings(
-        self,
-        findings: list,
-        relevant_files: dict[str, str],
-    ) -> list:
-        """Validate findings against full file content to filter false positives.
-
-        For each finding, asks the LLM to re-examine whether the issue is
-        genuinely valid given the complete file context. This catches issues
-        like:
-        - Code protected by circuit breakers / error boundaries
-        - Maps bounded by static data sources
-        - Functions called only from safe contexts
-        """
-        if not findings:
-            return []
-
-        self._set_task("validation")
-        validated = []
-
-        for finding in findings:
-            file_content = relevant_files.get(finding.file_path, "")
-            if not file_content:
-                # Can't validate without file content — keep the finding
-                validated.append(finding)
-                continue
-
-            prompt = (
-                f"## Finding Validation\n\n"
-                f"A code analyzer found this issue. Your job is to determine "
-                f"if it is a GENUINE problem or a FALSE POSITIVE.\n\n"
-                f"### Finding\n"
-                f"- **Title**: {finding.title}\n"
-                f"- **Severity**: {finding.severity.value}\n"
-                f"- **File**: {finding.file_path}\n"
-                f"- **Description**: {finding.description}\n"
-                f"- **Suggestion**: {finding.suggestion}\n\n"
-                f"### Full File Content\n"
-                f"```\n{file_content[:12000]}\n```\n\n"
-                f"### Validation Checklist\n"
-                f"Check ALL of these before deciding:\n"
-                f"1. Is the affected code already protected by try/catch, "
-                f"circuit breakers, error boundaries, or fallback patterns?\n"
-                f"2. If the finding is about unbounded growth — is the data source "
-                f"actually bounded (static array, enum, hardcoded list, config)?\n"
-                f"3. Is the function only called from contexts where the issue "
-                f"cannot occur?\n"
-                f"4. Would the suggested fix add unnecessary complexity without "
-                f"real benefit?\n"
-                f"5. Does the existing code already handle this edge case through "
-                f"a different mechanism?\n\n"
-                f"### Response\n"
-                f"Respond with EXACTLY one line:\n"
-                f"VALID: [brief reason why this is a real issue]\n"
-                f"or\n"
-                f"INVALID: [brief reason why this is a false positive]\n"
-            )
-
-            try:
-                # Set task type for custom provider
-                if hasattr(self._llm, "set_task"):
-                    self._llm.set_task("validation")
-
-                response = await self._llm.complete(
-                    prompt,
-                    system=(
-                        "You are a senior code reviewer validating automated findings. "
-                        "Be skeptical — reject findings that are false positives. "
-                        "A finding is INVALID if the code is already protected or "
-                        "the issue doesn't exist in practice."
-                    ),
-                    temperature=0.1,
-                )
-
-                response_text = response.strip().upper()
-                if response_text.startswith("INVALID"):
-                    logger.info(
-                        "❌ Finding rejected: %s — %s",
-                        finding.title,
-                        response.strip(),
-                    )
-                    continue
-
-                logger.info(
-                    "✅ Finding validated: %s — %s",
-                    finding.title,
-                    response.strip()[:80],
-                )
-                validated.append(finding)
-
-            except Exception as e:
-                logger.warning("Validation failed for %s: %s, keeping", finding.title, e)
-                validated.append(finding)
-
-        return validated
-
-    async def _check_ai_policy(self, repo: Repository) -> bool:
-        """Check if a repo has an AI policy that bans AI-generated PRs.
-
-        Checks:
-        - AI_POLICY.md or .github/AI_POLICY.md
-        - Keywords in CONTRIBUTING.md suggesting AI PRs are banned
-
-        Returns True if the repo bans AI PRs.
-        """
-        ai_policy_paths = [
-            "AI_POLICY.md",
-            ".github/AI_POLICY.md",
-            ".github/ai_policy.md",
-        ]
-
-        for path in ai_policy_paths:
-            try:
-                content = await self._github.get_file_content(repo.owner, repo.name, path)
-                if content:
-                    content_lower = content.lower()
-                    # Check for ban keywords
-                    ban_keywords = [
-                        "do not accept ai",
-                        "no ai-generated",
-                        "ai contributions are not accepted",
-                        "ban ai",
-                        "prohibit ai",
-                        "ai-generated pull requests will be closed",
-                        "reject ai",
-                    ]
-                    if any(kw in content_lower for kw in ban_keywords):
-                        return True
-            except Exception:
-                pass
-
-        # Also check CONTRIBUTING.md for anti-AI language
-        try:
-            for contrib_path in ["CONTRIBUTING.md", ".github/CONTRIBUTING.md"]:
-                try:
-                    content = await self._github.get_file_content(
-                        repo.owner, repo.name, contrib_path
-                    )
-                    if content:
-                        content_lower = content.lower()
-                        ban_phrases = [
-                            "ai-generated contributions",
-                            "no ai pull requests",
-                            "ban on ai-generated",
-                            "do not submit ai",
-                            "see ai_policy",
-                        ]
-                        if any(phrase in content_lower for phrase in ban_phrases):
-                            return True
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        return False
-
-    async def _check_pr_permissions(self, repo: Repository) -> bool:
-        """Check if repo restricts PRs to collaborators only.
-
-        Uses the GitHub permission endpoint to detect whether the
-        authenticated user can open pull requests. This avoids wasting
-        ~30 minutes of LLM calls on generation only to get a 422 at PR
-        creation time.
-
-        Returns True if PR creation is blocked (should skip this repo).
-        """
-        try:
-            user = await self._github.get_authenticated_user()
-            username = user["login"]
-
-            # Check if we're a collaborator via the permission endpoint
-            try:
-                await self._github._get(
-                    f"/repos/{repo.owner}/{repo.name}/collaborators/{username}/permission"
-                )
-                # If we get a valid response, we're a collaborator — no restriction.
-                return False
-            except Exception as perm_err:
-                err_str = str(perm_err).lower()
-                # 403 = not a collaborator. That's fine for public repos
-                # unless the repo has restricted PRs.
-                if "403" in err_str:
-                    # Not a collaborator. Check if the repo restricts PRs.
-                    # We can't know this from the API directly, so we try
-                    # to detect it from the repo's settings.
-                    # Fall through to the fork check below.
-                    pass
-                else:
-                    # 404 = repo not found/private → skip; other errors → don't block
-                    return "404" in err_str
-
-            # Try to fork as a lightweight permission test.
-            # If forking is disabled, PRs from non-collaborators are blocked.
-            try:
-                # Check if repo allows forking via the repo metadata
-                repo_data = await self._github._get(f"/repos/{repo.owner}/{repo.name}")
-                allow_forking = repo_data.get("allow_forking", True)
-                if not allow_forking:
-                    logger.warning(
-                        "%s has forking disabled — PRs restricted to collaborators",
-                        repo.full_name,
-                    )
-                    return True
-            except Exception:
-                pass
-
-            return False
-
-        except Exception as e:
-            logger.debug("PR permission check failed for %s: %s", repo.full_name, e)
-            return False  # Don't block on permission check failures
-
-    async def _close_linked_issues(
-        self,
-        repo: Repository,
-        pr_number: int,
-        *,
-        reason: str = "PR was closed",
-    ) -> None:
-        """Deny legacy issue closing until Task 5 can prove persisted provenance."""
-        logger.warning(
-            "No linked issue was closed for %s PR #%d (%s): persisted "
-            "created_by_contribai and auto_close provenance is unavailable",
-            repo.full_name,
-            pr_number,
-            reason,
-        )
-
-    async def _check_ci_and_close_if_failed(
-        self,
-        pr_result: PRResult,
-        repo: Repository,
-        *,
-        max_wait_sec: int = 90,
-        poll_interval: int = 15,
-    ) -> None:
-        """Wait for CI checks and auto-close the PR if they fail.
-
-        Polls the PR's head commit for check run results. If required
-        checks fail (e.g. lint, typecheck, unit tests), closes the PR
-        with a comment explaining which checks failed.
-        """
-        import asyncio
-
-        branch = pr_result.branch_name
-        fork_parts = pr_result.fork_full_name.split("/")
-        fork_owner = fork_parts[0]
-        fork_name = fork_parts[1] if len(fork_parts) > 1 else repo.name
-
-        # Get the head SHA of the PR branch
-        try:
-            branch_data = await self._github._get(
-                f"/repos/{fork_owner}/{fork_name}/git/ref/heads/{branch}"
-            )
-            head_sha = branch_data["object"]["sha"]
-        except Exception:
-            logger.debug("Could not get head SHA for CI check, skipping")
-            return
-
-        logger.info("⏳ Waiting for CI checks on PR #%d...", pr_result.pr_number)
-
-        elapsed = 0
-        while elapsed < max_wait_sec:
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
-
-            status = await self._github.get_combined_status(repo.owner, repo.name, head_sha)
-
-            if status["state"] == "pending":
-                logger.debug(
-                    "CI still running (%ds/%ds): %s",
-                    elapsed,
-                    max_wait_sec,
-                    ", ".join(status.get("in_progress", [])),
-                )
-                continue
-
-            if status["state"] == "success":
-                logger.info(
-                    "✅ CI passed for PR #%d (%d checks)",
-                    pr_result.pr_number,
-                    status["total"],
-                )
-                return
-
-            if status["state"] == "failure":
-                failed_names = ", ".join(status["failed"])
-                logger.warning(
-                    "❌ CI failed for PR #%d: %s",
-                    pr_result.pr_number,
-                    failed_names,
-                )
-
-                logger.warning(
-                    "PR #%d was not auto-closed after CI failure because this path "
-                    "has no publisher permit",
-                    pr_result.pr_number,
-                )
-                await self._close_linked_issues(
-                    repo, pr_result.pr_number, reason="CI checks failed"
-                )
-                await self._memory.update_pr_status(
-                    repo.full_name, pr_result.pr_number, "ci_failed"
-                )
-                return
-
-        # Timeout — log but don't close (CI may still be running)
-        logger.info(
-            "⏰ CI check timed out after %ds for PR #%d, leaving open",
-            max_wait_sec,
-            pr_result.pr_number,
-        )
+        return identify_key_files(file_tree, repo)
 
     def _set_task(self, task_name: str) -> None:
-        """Set the current task context for multi-model routing."""
+        """Set the current task context for multi-model routing.
+
+        Legacy entry point — :class:`PipelineContext.set_task` is the
+        preferred API for new code; this method remains so existing
+        callers (e.g. ``_process_repo_issues`` shims) keep working.
+        """
         from contribai.llm.provider import MultiModelProvider
 
         if isinstance(self._llm, MultiModelProvider):

@@ -9,6 +9,18 @@
 After Layers A → D land, ContribAI's module graph looks like this. ASCII-first because
 [docs/ARCHITECTURE.md](ARCHITECTURE.md) is the v1 diagram; this is the planned v2.
 
+## Delivery status
+
+| Layer | Scope | Status | Tests added |
+|---|---|---|---|
+| A | Tests + DRY (`text_utils`, `fallback.py` first commit) | ✅ Shipped | ~97 |
+| B | Registry plumbing (LLM, plugins, agents) | ✅ Shipped | 27 |
+| C | Pipeline decomposition (5 steps + `pipeline_core`) | ✅ Shipped | 51 |
+| D | Adapters (OpenHands, MetaGPT, Haystack, LangChain, LlamaIndex, SWE-agent) | ⏳ Next | TBD |
+
+**Layer A**: `beecd7b`, `48d4fb0`, `4b4cea2`. See [INTEGRATION_PLAN.md § Layer A](INTEGRATION_PLAN.md#layer-a--tests--dry-pr-1--shipped).
+**Layer B**: see [INTEGRATION_PLAN.md § Layer B](INTEGRATION_PLAN.md#layer-b--registry-plumbing-pr-2--shipped) for the full deliverable list and code links.
+
 ## High-level
 
 ```
@@ -134,6 +146,87 @@ Every external framework follows the **adapter + Protocol** rule:
 
 No code outside `contribai/` is imported at runtime. The `external/repos/<x>/`
 folders are strictly for **reading** implementation patterns.
+
+## Layer B — Registry plumbing (delivered)
+
+After Layer B, ContribAI has three pluggable registries instead of three
+hard-coded dispatch tables.
+
+### LLM provider registry
+
+```python
+from contribai.llm import (
+    register_provider, make_provider, available_providers, LLM_PROVIDERS,
+)
+
+# Built-in (registered at import time via @register_provider decorator):
+#   gemini, openai, anthropic, ollama, custom, copilot
+
+# Add a new one:
+@register_provider("my-endpoint")
+class MyProvider(LLMProvider):
+    async def complete(self, prompt, *, system=None, temperature=None, max_tokens=None):
+        ...
+
+# Look it up:
+provider = make_provider("my-endpoint", config)
+```
+
+`create_llm_provider()` (the high-level factory in
+[contribai/llm/provider.py](../contribai/llm/provider.py)) and
+`_create_provider_for_slot()` (in
+[contribai/llm/fallback.py](../contribai/llm/fallback.py)) both go through
+`make_provider()` — so any `@register_provider` addition is automatically
+usable from the top-level config and from every fallback chain slot.
+
+`CopilotProvider` was lifted out of `fallback.py` and registered under
+`"copilot"`; the slot factory uses a small routing table to map free-form
+slot names (`"rocket-free-2"`, `"kilo"`, `"copilot"`, …) onto registered
+provider classes.
+
+### Plugin registry singleton
+
+```python
+from contribai.plugins import discover, get_plugin_registry, reset_plugin_registry
+
+# Pipeline calls this once at init; entry-point discovery is idempotent.
+registry = discover()
+
+# Manual registration (e.g. in tests or for embedded plugins):
+registry.register_analyzer(MyAnalyzer())
+
+# List currently-loaded plugins:
+for plugin in registry.analyzers:
+    print(plugin.name)
+```
+
+`discover()` triggers entry-point discovery on the process-wide singleton.
+`reset_plugin_registry()` is a test-only escape hatch — the singleton is
+replaced on the next `get_plugin_registry()` call so test cases stay isolated.
+
+`CodeAnalyzer(plugin_analyzers=[...])` accepts the discovered plugins and
+runs them in parallel with the LLM-powered analyzers. Pipeline init
+populates this argument via `discover()`.
+
+### AgentCoordinator registry
+
+```python
+coord = AgentCoordinator(llm_provider)
+
+# Default agents installed (analyzer, codegen, reviewer, docs, planner)
+coord.list_agents()        # ['analyzer', 'codegen', 'reviewer', 'docs', 'planner']
+
+# Replace one:
+my_reviewer = MyReviewerAgent(llm, coord._router)
+coord.register("reviewer", my_reviewer)
+
+# Or build empty:
+empty = AgentCoordinator(llm_provider, register_defaults=False)
+empty.register("custom", MyAgent(llm_provider, ...))
+```
+
+The `register / unregister / get / list_agents` API replaces the
+hard-coded `_agents` dict that the v1 coordinator used.
 
 ## Why this is better than v1
 

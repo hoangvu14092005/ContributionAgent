@@ -76,6 +76,7 @@ class CodeAnalyzer:
         llm: LLMProvider,
         github: GitHubClient,
         config: AnalysisConfig,
+        plugin_analyzers: list | None = None,
     ):
         self._llm = llm
         self._github = github
@@ -84,6 +85,10 @@ class CodeAnalyzer:
             max_context_tokens=getattr(config, "max_context_tokens", 30_000)
         )
         self._localizer = Localizer()
+        # Layer B: optional list of AnalyzerPlugin instances from the
+        # PluginRegistry. Their findings are merged with the LLM-powered
+        # analyzers during `analyze()`. None means "no plugins".
+        self._plugin_analyzers: list = list(plugin_analyzers or [])
 
     async def localize(
         self,
@@ -148,6 +153,33 @@ class CodeAnalyzer:
                 logger.error("Analyzer failed: %s", result)
             elif isinstance(result, list):
                 all_findings.extend(result)
+
+        # ── Plugin analyzers (Layer B) ─────────────────────────────────────
+        # Run any AnalyzerPlugin instances registered via the plugin
+        # registry. Their findings are merged into the LLM-driven results
+        # before deduplication.
+        if self._plugin_analyzers:
+            plugin_tasks = [
+                self._run_plugin_analyzer(plugin, context)
+                for plugin in self._plugin_analyzers
+            ]
+            plugin_results = await asyncio.gather(
+                *plugin_tasks, return_exceptions=True
+            )
+            for plugin, result in zip(self._plugin_analyzers, plugin_results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "Plugin analyzer %s failed: %s",
+                        getattr(plugin, "name", plugin),
+                        result,
+                    )
+                elif isinstance(result, list):
+                    logger.info(
+                        "Plugin analyzer %s produced %d findings",
+                        getattr(plugin, "name", plugin),
+                        len(result),
+                    )
+                    all_findings.extend(result)
 
         # Deduplicate
         findings = self._deduplicate(all_findings)
@@ -527,6 +559,15 @@ class CodeAnalyzer:
             return score
 
         return sorted(files, key=file_score, reverse=True)
+
+    async def _run_plugin_analyzer(self, plugin, context: RepoContext) -> list:
+        """Run a single AnalyzerPlugin and return its findings.
+
+        Plugins use the :class:`AnalyzerPlugin` protocol defined in
+        :mod:`contribai.plugins.base`. They are passed the same
+        :class:`RepoContext` the LLM analyzers see.
+        """
+        return await plugin.analyze(context)
 
     async def _run_analyzer(self, name: str, context: RepoContext) -> list[Finding]:
         """Run a single LLM-powered analyzer."""

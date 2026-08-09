@@ -202,7 +202,7 @@ contribai/
 ├── web/            # FastAPI dashboard + webhooks + auth
 ├── scheduler/      # APScheduler cron automation
 ├── notifications/  # Slack, Discord, Telegram
-├── plugins/        # Entry-point plugin system
+├── plugins/        # Entry-point plugin system + `get_plugin_registry()` singleton
 ├── templates/      # YAML contribution templates
 └── cli/            # Rich CLI + TUI
 ```
@@ -231,6 +231,23 @@ ruff format contribai/              # Format
 
 ## Extending
 
+**LLM providers** — Register a new provider via the `@register_provider` decorator
+(Layer B). The factory, fallback chains, and CLI all pick it up automatically:
+
+```python
+from contribai.llm import register_provider, LLMProvider
+
+@register_provider("my-endpoint")
+class MyProvider(LLMProvider):
+    async def complete(self, prompt, *, system=None, temperature=None, max_tokens=None):
+        ...
+    async def chat(self, messages, *, system=None, temperature=None, max_tokens=None):
+        ...
+```
+
+Built-in providers (`gemini`, `openai`, `anthropic`, `ollama`, `custom`, `copilot`)
+are registered at import time. See [docs/INTEGRATION_PLAN.md § Layer B](docs/INTEGRATION_PLAN.md#layer-b--registry-plumbing-pr-2--shipped).
+
 **Plugins** — Create custom analyzers/generators as Python packages:
 
 ```python
@@ -249,6 +266,9 @@ class MyAnalyzer(AnalyzerPlugin):
 [project.entry-points."contribai.analyzers"]
 my_analyzer = "my_package:MyAnalyzer"
 ```
+
+The pipeline auto-discovers entry-point plugins at init via
+`contribai.plugins.discover()` and merges them into `CodeAnalyzer`.
 
 **MCP** — Use ContribAI from Claude Desktop or Antigravity IDE:
 
