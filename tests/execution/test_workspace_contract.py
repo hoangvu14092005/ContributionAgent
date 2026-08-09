@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import contribai.execution.workspaces.docker as docker_module
 from contribai.execution.resource_policy import ResourcePolicy
 from contribai.execution.workspaces.base import PatchCandidate
 from contribai.execution.workspaces.docker import DockerWorkspace
@@ -137,6 +138,53 @@ def test_docker_command_is_fail_closed_and_resource_bounded(tmp_path: Path) -> N
     assert "--pids-limit 128" in joined
     assert "--read-only" in joined
     assert "/var/run/docker.sock" not in joined
+
+
+@pytest.mark.asyncio
+async def test_docker_timeout_terminates_process_on_windows(
+    git_repo: tuple[Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, base_sha = git_repo
+    workspace = DockerWorkspace(
+        repo,
+        base_sha=base_sha,
+        snapshot_id="snapshot-timeout",
+        attempt_id="attempt-timeout",
+        workspace_path=repo,
+        docker_available=True,
+    )
+
+    class TimedOutProcess:
+        pid = 123
+        returncode = None
+        killed = False
+
+        async def communicate(self):
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -1
+
+    process = TimedOutProcess()
+
+    async def create_process(*args, **kwargs):
+        return process
+
+    async def raise_timeout(awaitable, *, timeout):
+        awaitable.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(docker_module.os, "name", "nt")
+    monkeypatch.setattr(docker_module.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(docker_module.asyncio, "wait_for", raise_timeout)
+
+    result = await workspace.execute("python -c 'pass'", timeout_sec=0.01)
+
+    assert process.killed is True
+    assert result.timed_out is True
+    assert result.status == "INCONCLUSIVE"
 
 
 @pytest.mark.asyncio

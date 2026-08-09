@@ -218,9 +218,10 @@ class DockerWorkspace(LocalWorkspace):
                 status="VERIFIED",
             )
         except TimeoutError:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            if os.name == "posix":
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            else:
                 process.kill()
             stdout, stderr = await process.communicate()
             return CommandResult(
@@ -236,7 +237,16 @@ class DockerWorkspace(LocalWorkspace):
     async def cleanup(self) -> None:
         """Remove the standalone clone without touching the source repository."""
         if self.path.exists():
-            await asyncio.to_thread(shutil.rmtree, self.path, True)
+            await asyncio.to_thread(shutil.rmtree, self.path, onerror=_remove_readonly)
+
+
+def _remove_readonly(function, path: str, exc_info) -> None:
+    """Retry removal after clearing Windows read-only file attributes."""
+    error = exc_info[1]
+    if not isinstance(error, PermissionError):
+        raise error
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
 
 
 def _host_is_root() -> bool:
