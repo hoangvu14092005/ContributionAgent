@@ -12,13 +12,14 @@ from dataclasses import dataclass, field
 
 from contribai.agents.registry import create_default_registry
 from contribai.analysis.analyzer import CodeAnalyzer
-from contribai.analysis.repo_intel import RepoIntelligence
+from contribai.analysis.repo_intel import RepoIntelligence, RepoProfile
 from contribai.core.config import ContribAIConfig
 from contribai.core.events import Event, EventBus, EventType, FileEventLogger
 from contribai.core.middleware import build_default_chain
 from contribai.core.models import (
     AnalysisResult,
     DiscoveryCriteria,
+    Issue,
     PRResult,
     Repository,
 )
@@ -28,6 +29,7 @@ from contribai.github.discovery import RepoDiscovery
 from contribai.github.guidelines import fetch_repo_guidelines  # noqa: F401
 from contribai.issues.solver import IssueSolver
 from contribai.llm.provider import create_llm_provider
+from contribai.opportunity.engine import OpportunityEngine, OpportunitySource
 from contribai.orchestrator.memory import Memory
 from contribai.orchestrator.pipeline_core import PipelineContext
 from contribai.orchestrator.review_gate import HumanReviewer, ReviewGate
@@ -36,6 +38,7 @@ from contribai.publishing.permit import PublishSideEffect
 from contribai.tools.protocol import create_default_tools
 
 logger = logging.getLogger(__name__)
+_DEFAULT_ISSUE_SOLVER = IssueSolver
 
 # Layer C: constants and `_titles_similar` moved to
 # :mod:`contribai.orchestrator.pipeline_constants`. They are re-imported
@@ -79,6 +82,7 @@ class ContribPipeline:
         self._review_gate: ReviewGate | None = None
         self._event_bus: EventBus = EventBus()
         self._repo_intel: RepoIntelligence | None = None
+        self._opportunity_engine = OpportunityEngine()
 
     async def _init_components(self):
         """Initialize all pipeline components."""
@@ -668,7 +672,9 @@ class ContribPipeline:
             repo_intel=self._repo_intel,
             event_bus=self._event_bus,
             config=self.config,
-            review_and_publish=self._review_and_publish,
+            review_and_publish=(
+                self._review_and_publish if self._review_gate is not None else None
+            ),
             check_ci=self._check_ci_and_close_if_failed,
             solver=solver,
         )
@@ -806,7 +812,12 @@ class ContribPipeline:
         logger.info("📋 Looking for solvable issues in %s...", repo.full_name)
 
         state = PipelineState(repo=repo, dry_run=dry_run, max_prs=max_prs)
-        solver = IssueSolver(llm=self._llm, github=self._github)
+        solver_factory = IssueSolver
+        if solver_factory is _DEFAULT_ISSUE_SOLVER:
+            from contribai.issues import solver as solver_module
+
+            solver_factory = solver_module.IssueSolver
+        solver = solver_factory(llm=self._llm, github=self._github)
         ctx = self._build_pipeline_context(solver=solver)
 
         issue_pipeline = Pipeline(
@@ -820,6 +831,63 @@ class ContribPipeline:
             label="issue",
         )
         return (await issue_pipeline.run(state, ctx)).result
+
+    async def _rank_issue_opportunities(
+        self, repo: Repository, issues: list[Issue], max_candidates: int
+    ) -> list[Issue]:
+        """Rank issue candidates and persist their read-only score evidence."""
+        profile: RepoProfile | None = None
+        if self._repo_intel is not None:
+            try:
+                profile = await self._repo_intel.profile(repo.owner, repo.name)
+            except Exception as exc:
+                logger.debug(
+                    "Opportunity repo profile failed for %s: %s",
+                    repo.full_name,
+                    exc,
+                )
+
+        outcomes = []
+        get_outcomes = getattr(self._memory, "get_contribution_outcomes", None)
+        if get_outcomes is not None:
+            try:
+                loaded_outcomes = await get_outcomes(repo.full_name)
+                if isinstance(loaded_outcomes, list):
+                    outcomes = loaded_outcomes
+            except Exception as exc:
+                logger.debug(
+                    "Opportunity outcome learning unavailable for %s: %s",
+                    repo.full_name,
+                    exc,
+                )
+
+        candidates = self._opportunity_engine.rank(
+            repo,
+            issues=issues,
+            profile=profile,
+            max_candidates=max_candidates,
+            outcomes=outcomes,
+        )
+        issue_candidates = [
+            candidate for candidate in candidates if candidate.source is OpportunitySource.ISSUE
+        ]
+
+        record_score = getattr(self._memory, "record_opportunity_score", None)
+        if record_score is not None:
+            for candidate in issue_candidates:
+                try:
+                    await record_score(candidate)
+                except Exception as exc:
+                    logger.debug(
+                        "Could not persist opportunity score for %s #%s: %s",
+                        repo.full_name,
+                        candidate.issue_number,
+                        exc,
+                    )
+
+        return [
+            candidate.task for candidate in issue_candidates if isinstance(candidate.task, Issue)
+        ]
 
     def _identify_key_files(self, file_tree: list, repo: Repository) -> list[str]:
         """Back-compat shim — calls :func:`contribai.orchestrator.steps.identify_key_files`.
