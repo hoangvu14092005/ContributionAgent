@@ -12,8 +12,7 @@ from dataclasses import dataclass, field
 
 from contribai.agents.registry import create_default_registry
 from contribai.analysis.analyzer import CodeAnalyzer
-from contribai.analysis.context_compressor import ContextCompressor
-from contribai.analysis.repo_intel import RepoIntelligence, RepoProfile
+from contribai.analysis.repo_intel import RepoIntelligence
 from contribai.core.config import ContribAIConfig
 from contribai.core.events import Event, EventBus, EventType, FileEventLogger
 from contribai.core.middleware import build_default_chain
@@ -26,12 +25,14 @@ from contribai.core.models import (
 from contribai.generator.engine import ContributionGenerator
 from contribai.github.client import GitHubClient
 from contribai.github.discovery import RepoDiscovery
-from contribai.github.guidelines import fetch_repo_guidelines
+from contribai.github.guidelines import fetch_repo_guidelines  # noqa: F401
 from contribai.issues.solver import IssueSolver
 from contribai.llm.provider import create_llm_provider
 from contribai.orchestrator.memory import Memory
-from contribai.orchestrator.review_gate import HumanReviewer
+from contribai.orchestrator.pipeline_core import PipelineContext
+from contribai.orchestrator.review_gate import HumanReviewer, ReviewGate
 from contribai.pr.manager import PRManager
+from contribai.publishing.permit import PublishSideEffect
 from contribai.tools.protocol import create_default_tools
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class ContribPipeline:
         self._agent_registry = None
         self._tool_registry = None
         self._reviewer: HumanReviewer | None = None
+        self._review_gate: ReviewGate | None = None
         self._event_bus: EventBus = EventBus()
         self._repo_intel: RepoIntelligence | None = None
 
@@ -169,6 +171,10 @@ class ContribPipeline:
         else:
             self._reviewer = HumanReviewer(auto_approve=True)
             logger.debug("Human review gate: disabled (auto-approve)")
+        self._review_gate = ReviewGate(
+            self._reviewer,
+            explicit_human_review=self.config.pipeline.human_review,
+        )
 
         # Event bus + file logger for observability
         from pathlib import Path
@@ -643,7 +649,7 @@ class ContribPipeline:
 
     # ── Internal ───────────────────────────────────────────────────────────
 
-    def _build_pipeline_context(self) -> "PipelineContext":
+    def _build_pipeline_context(self, *, solver: IssueSolver | None = None) -> PipelineContext:
         """Freeze the live collaborators into a :class:`PipelineContext`.
 
         The :class:`Pipeline` conductor treats ``ctx`` as immutable and
@@ -662,6 +668,79 @@ class ContribPipeline:
             repo_intel=self._repo_intel,
             event_bus=self._event_bus,
             config=self.config,
+            review_and_publish=self._review_and_publish,
+            check_ci=self._check_ci_and_close_if_failed,
+            solver=solver,
+        )
+
+    async def _review_and_publish(
+        self,
+        contribution,
+        finding,
+        repo: Repository,
+        guidelines,
+        *,
+        closes_issue: int | None = None,
+    ) -> PRResult | None:
+        """Apply the single human-review boundary before legacy publishing."""
+        planned_side_effects = [PublishSideEffect.CREATE_PR]
+        if closes_issue is None and guidelines.requires_issue_link:
+            planned_side_effects.insert(0, PublishSideEffect.CREATE_ISSUE)
+
+        decision = await self._review_gate.review(
+            contribution,
+            finding,
+            repo.full_name,
+            planned_side_effects=tuple(planned_side_effects),
+        )
+        if decision.approved is not True:
+            logger.info(
+                "Review did not approve %s (decision=%s)",
+                contribution.title,
+                decision.action,
+            )
+            return None
+
+        return await self._pr_manager.create_pr(
+            contribution,
+            repo,
+            guidelines=guidelines,
+            closes_issue=closes_issue,
+        )
+
+    async def _close_linked_issues(
+        self,
+        repo: Repository,
+        pr_number: int,
+        *,
+        reason: str = "PR was closed",
+    ) -> None:
+        """Deny issue closing when no permit-bearing publisher command exists."""
+        logger.warning(
+            "No linked issue was closed for %s PR #%d (%s): a publisher permit is required",
+            repo.full_name,
+            pr_number,
+            reason,
+        )
+
+    async def _check_ci_and_close_if_failed(
+        self,
+        pr_result: PRResult,
+        repo: Repository,
+        *,
+        max_wait_sec: int = 90,
+        poll_interval: int = 15,
+    ) -> None:
+        """Delegate CI monitoring while retaining the instance compatibility seam."""
+        from contribai.orchestrator.steps import _check_ci_and_close_if_failed
+
+        await _check_ci_and_close_if_failed(
+            self._github,
+            self._memory,
+            repo,
+            pr_result,
+            max_wait_sec=max_wait_sec,
+            poll_interval=poll_interval,
         )
 
     async def _process_repo(
@@ -727,7 +806,8 @@ class ContribPipeline:
         logger.info("📋 Looking for solvable issues in %s...", repo.full_name)
 
         state = PipelineState(repo=repo, dry_run=dry_run, max_prs=max_prs)
-        ctx = self._build_pipeline_context()
+        solver = IssueSolver(llm=self._llm, github=self._github)
+        ctx = self._build_pipeline_context(solver=solver)
 
         issue_pipeline = Pipeline(
             [

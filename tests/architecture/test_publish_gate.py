@@ -62,7 +62,7 @@ def test_only_github_publisher_calls_github_write_methods() -> None:
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr in _GITHUB_WRITE_METHODS
             ):
-                relative_path = path.relative_to(_PROJECT_ROOT)
+                relative_path = path.relative_to(_PROJECT_ROOT).as_posix()
                 violations.append(f"{relative_path}:{node.lineno}:{node.func.attr}")
 
     assert violations == [], "GitHub writes bypass GitHubPublisher:\n" + "\n".join(violations)
@@ -117,9 +117,11 @@ def test_only_github_publisher_obtains_write_authority() -> None:
             elif isinstance(node.func, ast.Attribute):
                 called_name = node.func.attr
             if called_name == _AUTHORITY_ISSUER:
-                publisher_issuers.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+                relative_path = path.relative_to(_PROJECT_ROOT).as_posix()
+                publisher_issuers.append(f"{relative_path}:{node.lineno}")
             elif called_name == _CLIENT_AUTHORITY_ISSUER:
-                client_issuers.append(f"{path.relative_to(_PROJECT_ROOT)}:{node.lineno}")
+                relative_path = path.relative_to(_PROJECT_ROOT).as_posix()
+                client_issuers.append(f"{relative_path}:{node.lineno}")
 
     assert len(publisher_issuers) == 1
     assert publisher_issuers[0].startswith("contribai/publishing/github_publisher.py:")
