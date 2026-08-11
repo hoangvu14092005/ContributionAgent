@@ -87,7 +87,6 @@ async def test_pipeline_executor_fails_closed_until_sandbox_is_enabled(
     assert result.state is WorkState.CLOSED
     events = await memory.work_items.list_events(item.id)
     assert any(
-        event.to_state is WorkState.CLOSED
-        and "sandbox.enabled=true" in str(event.payload)
+        event.to_state is WorkState.CLOSED and "sandbox.enabled=true" in str(event.payload)
         for event in events
     )

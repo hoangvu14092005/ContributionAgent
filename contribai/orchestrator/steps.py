@@ -351,9 +351,7 @@ async def generate_contribution_step(ctx: PipelineContext, state: PipelineState)
             continue
 
         state.contributions.append(contribution)
-        closes_issue = (
-            state.closes_issues[index] if index < len(state.closes_issues) else None
-        )
+        closes_issue = state.closes_issues[index] if index < len(state.closes_issues) else None
         from contribai.orchestrator.pipeline_core import ContributionEnvelope
 
         state.contribution_envelopes.append(
@@ -390,9 +388,7 @@ async def submit_pr_step(ctx: PipelineContext, state: PipelineState) -> None:
     envelopes = state.contribution_envelopes or [
         ContributionEnvelope(
             contribution=contribution,
-            closes_issue=state.closes_issues[index]
-            if index < len(state.closes_issues)
-            else None,
+            closes_issue=state.closes_issues[index] if index < len(state.closes_issues) else None,
         )
         for index, contribution in enumerate(state.contributions)
     ]

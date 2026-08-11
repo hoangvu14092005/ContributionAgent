@@ -394,9 +394,7 @@ class TestGenerateContributionStep:
         state.validated_findings = [first, second]
         state.closes_issues = [101, 202]
         state.context = MagicMock(spec=RepoContext)
-        ctx.generator.generate = AsyncMock(
-            side_effect=[None, _make_contribution(second)]
-        )
+        ctx.generator.generate = AsyncMock(side_effect=[None, _make_contribution(second)])
 
         await generate_contribution_step(ctx, state)
 
