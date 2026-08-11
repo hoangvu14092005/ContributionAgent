@@ -12,6 +12,7 @@ from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 from contribai.core.models import Contribution, Repository
+from contribai.core.path_policy import is_invalid_repository_path, is_protected_meta_path
 
 
 class PublishPermitError(ValueError):
@@ -120,8 +121,10 @@ class ContributionPublishCandidate:
         for change in all_changes:
             path = str(change.path).replace("\\", "/")
             pure = PurePosixPath(path)
-            if not path or pure.is_absolute() or ".." in pure.parts:
+            if is_invalid_repository_path(path) or pure.is_absolute() or ".." in pure.parts:
                 raise PublishCandidateError(f"file change path is outside the repository: {path}")
+            if is_protected_meta_path(path):
+                raise PublishCandidateError(f"file change path is protected metadata: {path}")
             if path in seen_paths:
                 raise PublishCandidateError(f"duplicate file change path: {path}")
             seen_paths.add(path)

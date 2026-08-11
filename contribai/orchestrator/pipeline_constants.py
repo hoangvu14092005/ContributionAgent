@@ -12,29 +12,9 @@ from __future__ import annotations
 
 from typing import Literal
 
+from contribai.core.path_policy import PROTECTED_META_FILES
+
 # ── File filters ──────────────────────────────────────────────────────────────
-
-
-#: Files that should NOT be modified/created by ContribAI.
-#: These are meta/governance files that projects manage themselves.
-PROTECTED_META_FILES: frozenset[str] = frozenset(
-    {
-        "CONTRIBUTING.md",
-        ".github/CONTRIBUTING.md",
-        "docs/CONTRIBUTING.md",
-        "CODE_OF_CONDUCT.md",
-        ".github/CODE_OF_CONDUCT.md",
-        "LICENSE",
-        "LICENSE.md",
-        "LICENSE.txt",
-        ".github/FUNDING.yml",
-        ".github/SECURITY.md",
-        "SECURITY.md",
-        ".github/CODEOWNERS",
-        ".all-contributorsrc",
-    }
-)
-
 
 #: File extensions skipped during pre-filter — doc/config-only changes are
 #: low-value and PRs that touch only these are typically rejected.

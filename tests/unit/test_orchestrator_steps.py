@@ -249,6 +249,8 @@ class TestRunAnalysisStep:
         findings = [
             _make_finding(title="Real", file_path="src/db.py"),
             _make_finding(title="License", file_path="LICENSE"),
+            _make_finding(title="Owners", file_path=".github/CODEOWNERS"),
+            _make_finding(title="Contributors", file_path=".all-contributorsrc"),
         ]
         ctx.analyzer.analyze = AsyncMock(
             return_value=AnalysisResult(repo=state.repo, findings=findings)
@@ -382,6 +384,26 @@ class TestGenerateContributionStep:
         assert state.contributions == []
         assert state.result.contributions_generated == 0
 
+    async def test_generated_contribution_keeps_its_issue_after_earlier_generation_gap(
+        self, ctx, state
+    ):
+        from contribai.core.models import RepoContext
+
+        first = _make_finding(title="First", file_path="src/first.py")
+        second = _make_finding(title="Second", file_path="src/second.py")
+        state.validated_findings = [first, second]
+        state.closes_issues = [101, 202]
+        state.context = MagicMock(spec=RepoContext)
+        ctx.generator.generate = AsyncMock(
+            side_effect=[None, _make_contribution(second)]
+        )
+
+        await generate_contribution_step(ctx, state)
+
+        assert len(state.contribution_envelopes) == 1
+        assert state.contribution_envelopes[0].contribution.finding.title == "Second"
+        assert state.contribution_envelopes[0].closes_issue == 202
+
     async def test_dry_run_appends_contribution_but_skips_pr(self, ctx, state, finding):
         from contribai.core.models import RepoContext
 
@@ -463,6 +485,33 @@ class TestSubmitPrStep:
         assert ctx.memory.record_pr.await_count == 1
         assert state.result.prs_created == 1
         assert pr_result in state.result.prs
+
+    async def test_shared_pr_quota_stops_after_one_publish_slot(self, ctx, state, finding):
+        from dataclasses import replace
+
+        from contribai.core.quotas import AsyncPRQuota
+
+        first = _make_contribution(finding)
+        second = _make_contribution(_make_finding(title="Second", file_path="src/second.py"))
+        state.contributions = [first, second]
+        ctx = replace(ctx, pr_quota=AsyncPRQuota(1), check_ci=AsyncMock())
+        ctx.pr_manager.create_pr = AsyncMock(
+            side_effect=[
+                PRResult(
+                    repo=state.repo,
+                    contribution=first,
+                    pr_number=1,
+                    pr_url="https://github.com/o/n/pull/1",
+                )
+            ]
+        )
+        ctx.pr_manager.check_compliance_and_fix = AsyncMock()
+
+        await submit_pr_step(ctx, state)
+
+        assert ctx.pr_manager.create_pr.await_count == 1
+        assert state.result.prs_created == 1
+        assert ctx.pr_quota.remaining == 0
 
     async def test_pr_creation_failure_appends_error(self, ctx, state, finding):
         state.contributions = [_make_contribution(finding)]

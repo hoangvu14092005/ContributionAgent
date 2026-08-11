@@ -6,11 +6,43 @@ with configurable daily limits and SQLite persistence.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date
 
 logger = logging.getLogger(__name__)
+
+
+class AsyncPRQuota:
+    """Reserve a bounded number of PR side-effect slots across async tasks."""
+
+    def __init__(self, limit: int):
+        if limit < 0:
+            raise ValueError("PR quota limit must be non-negative")
+        self._limit = limit
+        self._remaining = limit
+        self._lock = asyncio.Lock()
+
+    @property
+    def remaining(self) -> int:
+        """Return the number of unreserved publication slots."""
+        return self._remaining
+
+    async def try_acquire(self) -> bool:
+        """Atomically reserve one slot, returning false when the quota is full."""
+        async with self._lock:
+            if self._remaining <= 0:
+                return False
+            self._remaining -= 1
+            return True
+
+    async def release(self) -> None:
+        """Return a slot when a reservation produced no external PR side effect."""
+        async with self._lock:
+            if self._remaining >= self._limit:
+                raise RuntimeError("cannot release an unreserved PR quota slot")
+            self._remaining += 1
 
 
 @dataclass

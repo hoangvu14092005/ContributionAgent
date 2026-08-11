@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         RepoContext,
         Repository,
     )
+    from contribai.core.quotas import AsyncPRQuota
     from contribai.generator.engine import ContributionGenerator
     from contribai.github.client import GitHubClient
     from contribai.github.guidelines import RepoGuidelines
@@ -82,10 +83,9 @@ class PipelineState:
     repo: Repository
     dry_run: bool = False
     max_prs: int = 5
-    # Set by ``solve_issue_step`` for issue-mode runs. Parallel to
-    # ``state.contributions`` — ``closes_issues[i]`` corresponds to
-    # ``state.contributions[i]``. ``None`` entries mean "not linked to an
-    # issue" (i.e. analysis-mode runs).
+    issue_number: int | None = None
+    # Set by ``solve_issue_step`` for issue-mode runs. Entries are aligned with
+    # ``state.validated_findings`` until generation creates an envelope.
     closes_issues: list[int | None] = field(default_factory=list)
 
     # ── Step 1 outputs (load_repo_context_step) ───────────────────────
@@ -108,6 +108,7 @@ class PipelineState:
 
     # ── Step 4 outputs (generate_contribution_step) ───────────────────
     contributions: list[Contribution] = field(default_factory=list)
+    contribution_envelopes: list[ContributionEnvelope] = field(default_factory=list)
 
     # ── Step 5 outputs (submit_pr_step) ───────────────────────────────
     prs: list[PRResult] = field(default_factory=list)
@@ -148,6 +149,8 @@ class PipelineContext:
     solver: IssueSolver | None = None  # populated by `_build_pipeline_context` in issue mode
     review_and_publish: Callable[..., Awaitable[PRResult | None]] | None = None
     check_ci: Callable[..., Awaitable[None]] | None = None
+    pr_quota: AsyncPRQuota | None = None
+    controlled_publish: bool = False
 
     def set_task(self, task_name: str) -> None:
         """Set task context on the LLM (no-op for providers without it).
@@ -165,6 +168,14 @@ class PipelineContext:
 
             with contextlib.suppress(ValueError):
                 self.llm.set_task(TaskType(task_name))
+
+
+@dataclass(frozen=True, slots=True)
+class ContributionEnvelope:
+    """Keep generated contribution data bound to its originating issue."""
+
+    contribution: Contribution
+    closes_issue: int | None = None
 
 
 # ── Conductor ─────────────────────────────────────────────────────────────────
@@ -229,6 +240,7 @@ class Pipeline:
 
 
 __all__ = [
+    "ContributionEnvelope",
     "Pipeline",
     "PipelineContext",
     "PipelineState",

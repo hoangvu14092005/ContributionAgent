@@ -39,9 +39,9 @@ from contribai.core.events import Event, EventType
 from contribai.core.models import (
     RepoContext,
 )
+from contribai.core.path_policy import is_invalid_repository_path, is_protected_meta_path
 from contribai.github.guidelines import fetch_repo_guidelines
 from contribai.orchestrator.pipeline_constants import (
-    PROTECTED_META_FILES,
     SKIP_DIRECTORIES,
     SKIP_EXTENSIONS,
     _titles_similar,
@@ -324,7 +324,7 @@ async def generate_contribution_step(ctx: PipelineContext, state: PipelineState)
     context = state.context
     guidelines = state.guidelines
 
-    for finding in findings:
+    for index, finding in enumerate(findings):
         logger.info("Generating fix for: %s", finding.title)
         ctx.set_task("code_gen")
         await ctx.event_bus.emit(
@@ -351,6 +351,14 @@ async def generate_contribution_step(ctx: PipelineContext, state: PipelineState)
             continue
 
         state.contributions.append(contribution)
+        closes_issue = (
+            state.closes_issues[index] if index < len(state.closes_issues) else None
+        )
+        from contribai.orchestrator.pipeline_core import ContributionEnvelope
+
+        state.contribution_envelopes.append(
+            ContributionEnvelope(contribution=contribution, closes_issue=closes_issue)
+        )
         state.result.contributions_generated += 1
 
         # ── Dry run — record intent but stop before PR submission ─────
@@ -377,10 +385,27 @@ async def submit_pr_step(ctx: PipelineContext, state: PipelineState) -> None:
     repo = state.repo
     guidelines = state.guidelines
 
-    for i, contribution in enumerate(state.contributions):
-        # Parallel-list lookup — analysis mode never populates closes_issues,
-        # so this falls back to None.
-        closes_issue = state.closes_issues[i] if i < len(state.closes_issues) else None
+    from contribai.orchestrator.pipeline_core import ContributionEnvelope
+
+    envelopes = state.contribution_envelopes or [
+        ContributionEnvelope(
+            contribution=contribution,
+            closes_issue=state.closes_issues[index]
+            if index < len(state.closes_issues)
+            else None,
+        )
+        for index, contribution in enumerate(state.contributions)
+    ]
+
+    for envelope in envelopes:
+        contribution = envelope.contribution
+        closes_issue = envelope.closes_issue
+        quota_reserved = False
+        if ctx.pr_quota is not None:
+            quota_reserved = await ctx.pr_quota.try_acquire()
+            if not quota_reserved:
+                logger.warning("PR quota exhausted before publishing %s", contribution.title)
+                break
         try:
             logger.info("📤 Creating PR: %s", contribution.title)
             if ctx.review_and_publish is None:
@@ -399,6 +424,8 @@ async def submit_pr_step(ctx: PipelineContext, state: PipelineState) -> None:
                     closes_issue=closes_issue,
                 )
             if pr_result is None:
+                if quota_reserved:
+                    await ctx.pr_quota.release()
                 continue
             state.prs.append(pr_result)
             state.result.prs.append(pr_result)
@@ -426,14 +453,17 @@ async def submit_pr_step(ctx: PipelineContext, state: PipelineState) -> None:
                 fork=pr_result.fork_full_name,
             )
 
-            # Compliance check — best effort, doesn't block PR submission
-            try:
-                logger.info("🔍 Checking PR compliance...")
-                await ctx.pr_manager.check_compliance_and_fix(
-                    pr_result, contribution, guidelines=guidelines
-                )
-            except Exception as e:
-                logger.warning("Compliance check failed: %s", e)
+            # The legacy compliance helper may perform GitHub mutations.  A
+            # controlled publisher has already bound every write to a permit,
+            # so do not invoke an unscoped post-publish mutation here.
+            if not ctx.controlled_publish:
+                try:
+                    logger.info("🔍 Checking PR compliance...")
+                    await ctx.pr_manager.check_compliance_and_fix(
+                        pr_result, contribution, guidelines=guidelines
+                    )
+                except Exception as e:
+                    logger.warning("Compliance check failed: %s", e)
 
             # CI wait + auto-close — best effort
             try:
@@ -445,6 +475,8 @@ async def submit_pr_step(ctx: PipelineContext, state: PipelineState) -> None:
                 logger.warning("CI check failed: %s", e)
 
         except Exception as e:
+            if quota_reserved:
+                await ctx.pr_quota.release()
             error = f"PR creation failed for {contribution.title}: {e}"
             logger.error(error)
             state.result.errors.append(error)
@@ -480,7 +512,10 @@ async def solve_issue_step(ctx: PipelineContext, state: PipelineState) -> None:
     from contribai.issues.solver import IssueSolver
 
     solver = ctx.solver or IssueSolver(llm=ctx.llm, github=ctx.github)
-    issues = await solver.fetch_solvable_issues(repo, max_issues=max_prs, max_complexity=3)
+    issue_limit = max_prs if state.issue_number is None else max(max_prs, 20)
+    issues = await solver.fetch_solvable_issues(repo, max_issues=issue_limit, max_complexity=3)
+    if state.issue_number is not None:
+        issues = [issue for issue in issues if issue.number == state.issue_number]
     if not issues:
         logger.info("No solvable issues found in %s", repo.full_name)
         state.skip_reason = "no_findings"
@@ -596,9 +631,8 @@ def _is_actionable_finding(finding) -> bool:
     if any(part in SKIP_DIRECTORIES for part in path_parts):
         return False
 
-    # Drop protected meta files
-    basename = fp.rsplit("/", 1)[-1] if "/" in fp else fp
-    return basename.upper() not in PROTECTED_META_FILES
+    # Drop invalid or protected paths using the complete normalized path.
+    return not is_invalid_repository_path(fp) and not is_protected_meta_path(fp)
 
 
 # ── Helper: identify key files (used by issue mode) ─────────────────────────
