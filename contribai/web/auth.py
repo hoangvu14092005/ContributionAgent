@@ -1,8 +1,4 @@
-"""API key authentication for the web dashboard.
-
-Simple API key verification via X-API-Key header
-or api_key query parameter.
-"""
+"""API key authentication for the web dashboard via X-API-Key."""
 
 from __future__ import annotations
 
@@ -11,60 +7,80 @@ import hmac
 import logging
 import secrets
 
-from fastapi import HTTPException, Security
-from fastapi.security import APIKeyHeader, APIKeyQuery
+from fastapi import HTTPException, Security, status
+from fastapi.security import APIKeyHeader
 
 logger = logging.getLogger(__name__)
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-_api_key_query = APIKeyQuery(name="api_key", auto_error=False)
 
 # Will be set during app lifespan
 _valid_keys: list[str] = []
 _auth_enabled: bool = False
 
 
+def reset_auth() -> None:
+    """Remove all process-global API key state."""
+    global _valid_keys, _auth_enabled
+    _valid_keys = []
+    _auth_enabled = False
+
+
 def configure_auth(api_keys: list[str]):
     """Configure valid API keys at startup."""
     global _valid_keys, _auth_enabled
-    _valid_keys = api_keys
-    _auth_enabled = len(api_keys) > 0
+    _valid_keys = [key for key in api_keys if key.strip()]
+    _auth_enabled = len(_valid_keys) > 0
     if _auth_enabled:
         logger.info(
             "API key auth enabled with %d key(s)",
-            len(api_keys),
+            len(_valid_keys),
         )
     else:
         logger.info("API key auth disabled (no keys configured)")
 
 
-async def verify_api_key(
+async def get_presented_api_key(
     header_key: str | None = Security(_api_key_header),
-    query_key: str | None = Security(_api_key_query),
 ) -> str | None:
-    """Verify API key from header or query param.
+    """Return the header API key without authorizing an execution mode."""
+    return header_key
 
-    If no keys are configured, auth is disabled and
-    all requests pass through.
-    """
+
+def require_configured_api_key(key: str | None) -> str:
+    """Require a configured and valid API key for a live operation."""
     if not _auth_enabled:
-        return None
-
-    key = header_key or query_key
-    if not key:
         raise HTTPException(
-            status_code=401,
-            detail="API key required. Use X-API-Key header or api_key param.",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Live execution is unavailable because API keys are not configured.",
         )
 
-    # Use constant-time comparison to prevent timing attacks
+    if not key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key required. Use the X-API-Key header.",
+        )
+
     if not any(hmac.compare_digest(key, valid) for valid in _valid_keys):
         raise HTTPException(
-            status_code=403,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid API key.",
         )
 
     return key
+
+
+async def verify_api_key(
+    header_key: str | None = Security(_api_key_header),
+) -> str | None:
+    """Verify an API key from the X-API-Key header.
+
+    If no keys are configured, auth is disabled and all requests pass through.
+    """
+    if not _auth_enabled:
+        return None
+
+    return require_configured_api_key(header_key)
 
 
 def verify_webhook_signature(

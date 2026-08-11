@@ -19,7 +19,6 @@ import pytest
 from contribai.analysis.repo_conventions import RepoConventions
 from contribai.core.models import Repository
 
-
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
@@ -63,7 +62,7 @@ def snake_python_files() -> dict[str, str]:
             '    """Compute the sum of values."""\n'
             "    total: int = 0\n"
             "    for v in values:\n"
-            '        if v > 0:\n'
+            "        if v > 0:\n"
             "            total += v\n"
             "    return total\n"
         ),
@@ -220,9 +219,7 @@ class TestDefaultConventions:
 
 
 class TestExtractFromFiles:
-    def test_no_code_files_returns_defaults(
-        self, repo_python, caplog
-    ):
+    def test_no_code_files_returns_defaults(self, repo_python, caplog):
         # Pass only a README.md; repo_conventions filters to code files.
         files = {"README.md": "Hello world"}
         result = RepoConventions.extract_from_files(repo_python, files)
@@ -250,19 +247,14 @@ class TestExtractFromFiles:
 
     def test_confidence_grows_with_sample_size(self, repo_python):
         tiny = {"src/foo.py": "x = 1\n"}
-        huge = {
-            f"src/f{i}.py": "\n".join(["x = 1"] * 60)
-            for i in range(20)
-        }
+        huge = {f"src/f{i}.py": "\n".join(["x = 1"] * 60) for i in range(20)}
         # 60 * 20 = 1200 lines → confidence capped at 1.0.
         c_tiny = RepoConventions.extract_from_files(repo_python, tiny)
         c_huge = RepoConventions.extract_from_files(repo_python, huge)
         assert c_tiny.confidence < c_huge.confidence
         assert c_huge.confidence == 1.0
 
-    def test_python_repo_with_no_functions_still_returns_valid_conventions(
-        self, repo_python
-    ):
+    def test_python_repo_with_no_functions_still_returns_valid_conventions(self, repo_python):
         # Edge case: Python file with no `def` lines. should not crash.
         files = {"empty.py": "x = 1\ny = 2\n"}
         c = RepoConventions.extract_from_files(repo_python, files)
@@ -298,7 +290,7 @@ class TestIndividualDetections:
         assert RepoConventions._detect_indentation(files) == "tabs"
 
     def test_quote_style_double(self):
-        files = {'f.py': 'x = "a"\ny = "b"\nz = "c"\n'}
+        files = {"f.py": 'x = "a"\ny = "b"\nz = "c"\n'}
         assert RepoConventions._detect_quote_style(files) == "double"
 
     def test_quote_style_single(self):
@@ -306,7 +298,7 @@ class TestIndividualDetections:
         assert RepoConventions._detect_quote_style(files) == "single"
 
     def test_quote_style_mixed(self):
-        files = {'f.py': 'x = "a"\nvar y = \'b\'\n'}
+        files = {"f.py": "x = \"a\"\nvar y = 'b'\n"}
         # Roughly equal → mixed.
         assert RepoConventions._detect_quote_style(files) == "mixed"
 
@@ -332,16 +324,16 @@ class TestIndividualDetections:
         # Multiple Google-style markers; should win.
         content = "\n".join(
             [
-                'def a(x):',
+                "def a(x):",
                 '    """Summary.',
-                '',
-                '    Args:',
-                '        x: Something.',
-                '',
-                '    Returns:',
-                '        The value.',
+                "",
+                "    Args:",
+                "        x: Something.",
+                "",
+                "    Returns:",
+                "        The value.",
                 '    """',
-                '    return x',
+                "    return x",
             ]
         )
         files = {"f.py": content * 5}
@@ -350,19 +342,19 @@ class TestIndividualDetections:
     def test_docstring_style_numpy(self):
         content = "\n".join(
             [
-                'def a(x):',
+                "def a(x):",
                 '    """Summary.',
-                '',
-                '    Parameters',
-                '    ----------',
-                '    x : int',
-                '        Something.',
-                '',
-                '    Returns',
-                '    -------',
-                '        The value.',
+                "",
+                "    Parameters",
+                "    ----------",
+                "    x : int",
+                "        Something.",
+                "",
+                "    Returns",
+                "    -------",
+                "        The value.",
                 '    """',
-                '    return x',
+                "    return x",
             ]
         )
         files = {"f.py": content * 5}

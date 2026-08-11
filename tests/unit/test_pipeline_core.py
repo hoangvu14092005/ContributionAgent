@@ -24,7 +24,6 @@ from contribai.orchestrator.pipeline_core import (
 
 def _ctx() -> PipelineContext:
     """Minimal PipelineContext for conductor-only tests; steps aren't called."""
-    import asyncio
     from unittest.mock import AsyncMock
 
     return PipelineContext(
@@ -45,9 +44,7 @@ def _state() -> PipelineState:
     from contribai.core.models import Repository
 
     return PipelineState(
-        repo=Repository(
-            owner="o", name="n", full_name="o/n", default_branch="main"
-        )
+        repo=Repository(owner="o", name="n", full_name="o/n", default_branch="main")
     )
 
 
@@ -98,8 +95,8 @@ class TestPipelineConductor:
         await pipeline.run(state, _ctx())
 
         assert s1._log == ["s1"]  # type: ignore[attr-defined]
-        assert s2._log == []      # type: ignore[attr-defined]
-        assert s3._log == []      # type: ignore[attr-defined]
+        assert s2._log == []  # type: ignore[attr-defined]
+        assert s3._log == []  # type: ignore[attr-defined]
         assert state.skip_reason == "no_findings"
 
     async def test_propagates_exceptions(self):

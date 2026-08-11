@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from contribai.core.models import Repository
-    from contribai.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +60,7 @@ Any style mismatch will result in rejection.
 """
 
     @classmethod
-    def extract_from_files(
-        cls, repo: Repository, files: dict[str, str]
-    ) -> RepoConventions:
+    def extract_from_files(cls, repo: Repository, files: dict[str, str]) -> RepoConventions:
         """Extract conventions by analyzing code files.
 
         Args:

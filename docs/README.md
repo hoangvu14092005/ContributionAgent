@@ -26,6 +26,10 @@ Welcome to the ContribAI documentation suite. This directory contains comprehens
 
 ### Reference
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** — High-level system overview (247 LOC)
+- **[Contribution Control Plane](./CONTRIBUTION_CONTROL_PLANE.md)** — Active
+  WorkItem, engine, verification, review, and publish boundaries
+- **[ADR-0001](./decisions/0001-contribution-control-plane.md)** — Why the
+  control plane owns patch collection and publishing
 
 ---
 
@@ -133,6 +137,7 @@ docs/
 | project-roadmap.md | Future planning | 401 | 15K |
 | deployment-guide.md | Operations | 822 | 19K |
 | ARCHITECTURE.md | Overview | 247 | 11K |
+| CONTRIBUTION_CONTROL_PLANE.md | Active safety architecture | — | — |
 | **Total** | **7 docs** | **3,658** | **115K** |
 
 ---
@@ -214,7 +219,7 @@ A: Yes, open a GitHub issue or discussion with `[DOCS]` prefix.
 - **CONTRIBUTING.md** — Contribution guidelines (project root)
 - **CHANGELOG.md** — Release history & changes (project root)
 - **SECURITY.md** — Security policies (project root)
-- **LICENSE** — AGPL-3.0 + Commons Clause (project root)
+- **LICENSE** — MIT (project root)
 - **.github/workflows/** — CI/CD pipeline (GitHub Actions)
 
 ---

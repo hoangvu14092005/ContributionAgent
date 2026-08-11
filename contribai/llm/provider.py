@@ -19,19 +19,35 @@ to every fallback slot.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
+import warnings
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 from contribai.core.exceptions import LLMError, LLMRateLimitError
 from contribai.core.retry import rate_limit_retry
+from contribai.llm.models import LLMRequest, TaskType
 
 if TYPE_CHECKING:
     from contribai.core.config import LLMConfig
 
 logger = logging.getLogger(__name__)
+
+_TASK_CONTEXT: ContextVar[TaskType | str | None] = ContextVar("contribai_llm_task", default=None)
+
+
+def current_task_context() -> TaskType | str | None:
+    """Return the coroutine-local compatibility task, if one is set."""
+    return _TASK_CONTEXT.get()
+
+
+def set_task_context(task: TaskType | str) -> None:
+    """Set task context for legacy callers without mutating provider state."""
+    _TASK_CONTEXT.set(task)
 
 
 # ── Abstract base ──────────────────────────────────────────────────────────────
@@ -54,6 +70,8 @@ class LLMProvider(ABC):
         system: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
+        task: TaskType | str | None = None,
     ) -> str:
         """Single-turn completion."""
 
@@ -65,11 +83,35 @@ class LLMProvider(ABC):
         system: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
+        task: TaskType | str | None = None,
     ) -> str:
         """Multi-turn chat completion."""
 
     async def close(self):  # noqa: B027
         """Clean up any resources."""
+
+    async def complete_request(self, request: LLMRequest) -> str:
+        """Execute an immutable request without shared provider task state."""
+        messages = [dict(message) for message in request.messages]
+        return await asyncio.wait_for(
+            self.chat(
+                messages,
+                max_tokens=request.max_tokens,
+                model=request.model,
+                task=request.task,
+            ),
+            timeout=request.timeout_sec,
+        )
+
+    def set_task(self, task_type: TaskType | str) -> None:
+        """Deprecated compatibility shim using coroutine-local context."""
+        warnings.warn(
+            "set_task is deprecated; construct an LLMRequest with task instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        set_task_context(task_type)
 
 
 # ── Provider registry ─────────────────────────────────────────────────────────
@@ -145,9 +187,7 @@ def make_provider(name: str, config: LLMConfig) -> LLMProvider:
     provider_cls = LLM_PROVIDERS.get(name)
     if provider_cls is None:
         available = ", ".join(sorted(LLM_PROVIDERS)) or "<none>"
-        raise LLMError(
-            f"Unknown LLM provider: {name!r}. Available: {available}"
-        )
+        raise LLMError(f"Unknown LLM provider: {name!r}. Available: {available}")
     return provider_cls(config)
 
 
@@ -198,6 +238,7 @@ class GeminiProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         model: str | None = None,
+        task: TaskType | str | None = None,
     ) -> str:
         from google.genai import types
 
@@ -232,6 +273,7 @@ class GeminiProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         model: str | None = None,
+        task: TaskType | str | None = None,
     ) -> str:
         from google.genai import types
 
@@ -296,6 +338,8 @@ class OpenAIProvider(LLMProvider):
         system: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
+        task: TaskType | str | None = None,
     ) -> str:
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
@@ -306,7 +350,7 @@ class OpenAIProvider(LLMProvider):
 
         try:
             response = await self._client.chat.completions.create(
-                model=self.model,
+                model=model or self.model,
                 messages=all_messages,
                 temperature=temp,
                 max_tokens=max_tok,
@@ -349,13 +393,15 @@ class AnthropicProvider(LLMProvider):
         system: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
+        task: TaskType | str | None = None,
     ) -> str:
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
 
         try:
             kwargs = {
-                "model": self.model,
+                "model": model or self.model,
                 "messages": messages,
                 "temperature": temp,
                 "max_tokens": max_tok,
@@ -416,7 +462,7 @@ class OllamaProvider(LLMProvider):
 
         try:
             payload = {
-                "model": self.model,
+                "model": kwargs.get("model") or self.model,
                 "messages": all_messages,
                 "stream": False,
                 "options": {"temperature": temp},
@@ -448,13 +494,14 @@ class CustomProvider(LLMProvider):
         try:
             from openai import AsyncOpenAI
 
-            self._base_url = config.custom_base_url or config.base_url or "http://localhost:20128/v1"
+            self._base_url = (
+                config.custom_base_url or config.base_url or "http://localhost:20128/v1"
+            )
             self._client = AsyncOpenAI(
                 api_key=config.api_key or "dummy-key",
                 base_url=self._base_url,
             )
             self._custom_models = config.custom_models or {}
-            self._current_task = "default"
             logger.info(
                 "Custom provider initialized: %s (models: %s)",
                 self._base_url,
@@ -464,17 +511,22 @@ class CustomProvider(LLMProvider):
             raise LLMError("openai package not installed") from e
 
     def set_task(self, task_type: str) -> None:
-        """Set current task type for model routing."""
-        self._current_task = task_type
-        logger.debug("Custom provider task set to: %s", task_type)
+        """Deprecated compatibility shim for model routing."""
+        super().set_task(task_type)
+        logger.debug("Custom provider task context set to: %s", task_type)
 
-    def _get_model_for_task(self, override_model: str | None = None) -> str:
+    def _get_model_for_task(
+        self,
+        override_model: str | None = None,
+        task: TaskType | str | None = None,
+    ) -> str:
         """Get the appropriate model for the current task."""
         if override_model:
             return override_model
 
         # Map task to model from config
-        model = self._custom_models.get(self._current_task)
+        task_name = str(task or current_task_context() or "default")
+        model = self._custom_models.get(task_name)
         if model:
             return model
 
@@ -494,7 +546,8 @@ class CustomProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         model: str | None = None,
-        **kwargs
+        task: TaskType | str | None = None,
+        **kwargs,
     ) -> str:
         messages = []
         if system:
@@ -505,6 +558,7 @@ class CustomProvider(LLMProvider):
             temperature=temperature,
             max_tokens=max_tokens,
             model=model,
+            task=task,
         )
 
     async def chat(
@@ -515,12 +569,13 @@ class CustomProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         model: str | None = None,
+        task: TaskType | str | None = None,
     ) -> str:
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
 
         # Get model for current task
-        use_model = self._get_model_for_task(model)
+        use_model = self._get_model_for_task(model, task)
 
         all_messages = list(messages)
         if system and not any(m["role"] == "system" for m in all_messages):
@@ -529,7 +584,7 @@ class CustomProvider(LLMProvider):
         try:
             logger.info(
                 "🤖 Custom LLM call [task=%s, model=%s]",
-                self._current_task,
+                task or current_task_context() or "default",
                 use_model,
             )
             response = await self._client.chat.completions.create(
@@ -672,17 +727,15 @@ class MultiModelProvider(LLMProvider):
 
     def __init__(self, config: LLMConfig, strategy: str = "balanced"):
         super().__init__(config)
-        from contribai.llm.models import TaskType
         from contribai.llm.router import TaskRouter
 
         self._inner = GeminiProvider(config)
         self._router = TaskRouter(strategy=strategy)
-        self._task_type = TaskType.ANALYSIS  # current task context
         self._call_log: list[dict] = []
 
     def set_task(self, task_type) -> None:
-        """Set the current task context for model routing."""
-        self._task_type = task_type
+        """Deprecated compatibility shim for coroutine-local routing."""
+        super().set_task(task_type)
 
     async def complete(
         self,
@@ -692,22 +745,24 @@ class MultiModelProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         model: str | None = None,
+        task: TaskType | str | None = None,
     ) -> str:
+        task_type = TaskType(task or current_task_context() or TaskType.ANALYSIS)
         if model is None:
             decision = self._router.route(
-                self._task_type,
+                task_type,
                 complexity=min(len(prompt) // 500, 10),
             )
             model = decision.model.name
             logger.info(
                 "🧠 [%s] → %s (%s)",
-                self._task_type.value,
+                task_type.value,
                 decision.model.display_name,
                 decision.reason,
             )
             self._call_log.append(
                 {
-                    "task": self._task_type.value,
+                    "task": task_type.value,
                     "model": model,
                     "reason": decision.reason,
                 }
@@ -728,16 +783,18 @@ class MultiModelProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         model: str | None = None,
+        task: TaskType | str | None = None,
     ) -> str:
+        task_type = TaskType(task or current_task_context() or TaskType.ANALYSIS)
         if model is None:
             decision = self._router.route(
-                self._task_type,
+                task_type,
                 complexity=5,
             )
             model = decision.model.name
             logger.info(
                 "🧠 [%s] → %s (%s)",
-                self._task_type.value,
+                task_type.value,
                 decision.model.display_name,
                 decision.reason,
             )
@@ -747,6 +804,7 @@ class MultiModelProvider(LLMProvider):
             temperature=temperature,
             max_tokens=max_tokens,
             model=model,
+            task=task_type,
         )
 
     async def close(self):
@@ -787,12 +845,19 @@ def create_llm_provider(
                      MultiModelProvider for per-task model routing
         strategy: Routing strategy (performance/balanced/economy)
     """
+    if config.model_gateway_required:
+        raise LLMError(
+            "model gateway is required for this provider; use ModelGateway "
+            "instead of raw provider access"
+        )
+
     # ── Fallback chain takes priority over multi-model ─────────────────────
     if config.fallback_enabled and config.fallback_chains:
         from contribai.llm.fallback import (
             FallbackChainProvider,
             build_fallback_chains,
         )
+
         chains, default_chain = build_fallback_chains(config)
         logger.info(
             "🔗 Using fallback chain provider (tasks=%d, default chain length=%d)",
@@ -818,17 +883,17 @@ def create_llm_provider(
 
 
 __all__ = [
-    "LLMProvider",
     "LLM_PROVIDERS",
-    "register_provider",
-    "make_provider",
-    "available_providers",
-    "GeminiProvider",
-    "OpenAIProvider",
     "AnthropicProvider",
-    "OllamaProvider",
-    "CustomProvider",
     "CopilotProvider",
+    "CustomProvider",
+    "GeminiProvider",
+    "LLMProvider",
     "MultiModelProvider",
+    "OllamaProvider",
+    "OpenAIProvider",
+    "available_providers",
     "create_llm_provider",
+    "make_provider",
+    "register_provider",
 ]

@@ -77,6 +77,9 @@ class Issue(BaseModel):
     title: str
     body: str | None = None
     labels: list[str] = Field(default_factory=list)
+    assignees: list[str] = Field(default_factory=list)
+    comments: int = 0
+    reactions: int = 0
     state: str = "open"
     created_at: datetime | None = None
     html_url: str = ""
@@ -89,6 +92,38 @@ class FileNode(BaseModel):
     type: str  # "blob" or "tree"
     size: int = 0
     sha: str = ""
+
+
+class RepositorySnapshot(BaseModel):
+    """Immutable source snapshot used to build one contribution context."""
+
+    model_config = {"frozen": True}
+
+    base_sha: str
+    file_tree: list[FileNode] = Field(default_factory=list)
+    files: dict[str, str] = Field(default_factory=dict)
+    readme_content: str | None = None
+    contributing_guide: str | None = None
+
+
+class PRSummary(BaseModel):
+    """Small, prompt-safe summary of one historical pull request."""
+
+    number: int
+    title: str
+    state: str = "open"
+    merged: bool = False
+    author: str | None = None
+    labels: list[str] = Field(default_factory=list)
+
+
+class AttemptSummary(BaseModel):
+    """Audit summary of a previous isolated repair attempt."""
+
+    attempt_id: str
+    status: str
+    changed_files: list[str] = Field(default_factory=list)
+    reason: str = ""
 
 
 # ── Analysis Models ────────────────────────────────────────────────────────────
@@ -214,6 +249,7 @@ class RepoContext(BaseModel):
     relevant_files: dict[str, str] = Field(default_factory=dict)  # path -> content
     open_issues: list[Issue] = Field(default_factory=list)
     coding_style: str | None = None  # detected coding conventions
+    repo_intelligence: str = ""  # resolved profile/history context
 
 
 # ── Patrol Models ──────────────────────────────────────────────────────────

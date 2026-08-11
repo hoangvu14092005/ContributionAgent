@@ -33,6 +33,8 @@ class SandboxResult:
     errors: str = ""
     language: str = ""
     duration_sec: float = 0.0
+    status: str = "UNVERIFIED"
+    publishable: bool = False
 
 
 # Language → Docker image mapping
@@ -98,11 +100,23 @@ class Sandbox:
             SandboxResult with success status and any errors.
         """
         if not self._enabled:
-            return SandboxResult(success=True, output="Sandbox disabled", language=language)
+            return SandboxResult(
+                success=True,
+                output="Sandbox disabled",
+                language=language,
+                status="UNVERIFIED",
+                publishable=False,
+            )
 
         if not self.available:
-            logger.warning("Docker not found, falling back to local validation")
-            return await self._validate_local(code, language)
+            logger.warning("Docker not found; validation is unverified")
+            return SandboxResult(
+                success=False,
+                errors="Docker unavailable; validation was not performed",
+                language=language,
+                status="UNVERIFIED",
+                publishable=False,
+            )
 
         return await self._validate_docker(code, language)
 
@@ -135,6 +149,8 @@ class Sandbox:
                 success=True,
                 output=f"No Docker image for {language}, skipping",
                 language=language,
+                status="UNVERIFIED",
+                publishable=False,
             )
 
         # Write code to temp file
@@ -164,6 +180,8 @@ class Sandbox:
                 errors=stderr.decode()[:2000],
                 language=language,
                 duration_sec=round(duration, 2),
+                status="VERIFIED",
+                publishable=proc.returncode == 0,
             )
         except TimeoutError:
             return SandboxResult(
@@ -171,12 +189,16 @@ class Sandbox:
                 errors=f"Timeout after {self._timeout}s",
                 language=language,
                 duration_sec=float(self._timeout),
+                status="INCONCLUSIVE",
+                publishable=False,
             )
         except Exception as e:
             return SandboxResult(
                 success=False,
                 errors=str(e),
                 language=language,
+                status="INCONCLUSIVE",
+                publishable=False,
             )
         finally:
             Path(temp_path).unlink(missing_ok=True)
@@ -192,6 +214,8 @@ class Sandbox:
             success=True,
             output=f"No local validator for {language}",
             language=language,
+            status="UNVERIFIED",
+            publishable=False,
         )
 
     @staticmethod
@@ -208,6 +232,8 @@ class Sandbox:
                 output="Syntax OK",
                 language="python",
                 duration_sec=round(time.monotonic() - start, 4),
+                status="VERIFIED",
+                publishable=True,
             )
         except SyntaxError as e:
             return SandboxResult(
@@ -215,6 +241,8 @@ class Sandbox:
                 errors=f"SyntaxError at line {e.lineno}: {e.msg}",
                 language="python",
                 duration_sec=round(time.monotonic() - start, 4),
+                status="VERIFIED",
+                publishable=False,
             )
 
     @staticmethod

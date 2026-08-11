@@ -1,4 +1,10 @@
-# Architecture
+# Architecture (historical reference)
+
+> This document describes the pre-control-plane pipeline and is retained for
+> historical context. The active architecture is documented in
+> [`CONTRIBUTION_CONTROL_PLANE.md`](CONTRIBUTION_CONTROL_PLANE.md). Middleware,
+> progressive skills, and the legacy sandbox shown below are not the authority
+> for engine execution or GitHub publishing.
 
 ContribAI v2.8.0 — DeerFlow/AgentScope-inspired agent architecture.
 
@@ -244,4 +250,3 @@ multi_model:   # Task routing strategy
 | `gh release create` hangs in PowerShell | Backticks in `--notes` confuse PS parser | Use `--notes-file /tmp/notes.md` instead |
 | Coverage drops below 50% | New modules added without tests | Add tests in `tests/unit/test_<module>.py` |
 | Rich output invisible when piped | Rich buffers to file | Check file size to confirm progress |
-

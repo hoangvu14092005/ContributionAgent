@@ -10,8 +10,8 @@ The split mirrors the data-flow diagram in ``docs/ARCHITECTURE_V2.md``:
     1. ``load_repo_context_step``     — pre-flight, guidelines, repo intel
     2. ``run_analysis_step``          — analyzer + pre-filter
     3. ``validate_findings_step``     — build context, dedup, LLM-validate
-    4. ``generate_contribution_step`` — generate + human review
-    5. ``submit_pr_step``             — create PR, compliance, CI
+    4. ``generate_contribution_step`` — generate candidate
+    5. ``submit_pr_step``             — review, create PR, compliance, CI
 
   Issue mode (reuses load + generate + submit):
     1. ``load_repo_context_step`` (shared)
@@ -39,16 +39,15 @@ from contribai.core.events import Event, EventType
 from contribai.core.models import (
     RepoContext,
 )
+from contribai.core.path_policy import is_invalid_repository_path, is_protected_meta_path
 from contribai.github.guidelines import fetch_repo_guidelines
 from contribai.orchestrator.pipeline_constants import (
-    PROTECTED_META_FILES,
     SKIP_DIRECTORIES,
     SKIP_EXTENSIONS,
     _titles_similar,
 )
 
 if TYPE_CHECKING:
-    from contribai.core.models import Finding
     from contribai.llm.provider import LLMProvider
     from contribai.orchestrator.pipeline_core import PipelineContext, PipelineState
 
@@ -121,13 +120,9 @@ async def load_repo_context_step(ctx: PipelineContext, state: PipelineState) -> 
     # ── Smart dedup — inject PR history into analysis context ───────────
     past_prs = await ctx.memory.get_repo_prs(repo.full_name)
     if past_prs:
-        pr_lines = [
-            f"  - [{pr.get('status', '?')}] {pr.get('title', '?')}"
-            for pr in past_prs[:10]
-        ]
+        pr_lines = [f"  - [{pr.get('status', '?')}] {pr.get('title', '?')}" for pr in past_prs[:10]]
         state.pr_history_context = (
-            "\n\nPREVIOUSLY SUBMITTED PRs (DO NOT repeat these):\n"
-            + "\n".join(pr_lines)
+            "\n\nPREVIOUSLY SUBMITTED PRs (DO NOT repeat these):\n" + "\n".join(pr_lines)
         )
         logger.info("🔁 Injected %d past PRs into analysis context", len(past_prs))
 
@@ -270,9 +265,7 @@ async def validate_findings_step(ctx: PipelineContext, state: PipelineState) -> 
     )
 
     # ── Dedup — drop findings that overlap with past PRs ───────────────
-    deduped = await _dedup_against_past_prs(
-        ctx, repo, findings[: state.max_prs]
-    )
+    deduped = await _dedup_against_past_prs(ctx, repo, findings[: state.max_prs])
 
     if not deduped:
         logger.info("No new findings after duplicate filter for %s", repo.full_name)
@@ -331,7 +324,7 @@ async def generate_contribution_step(ctx: PipelineContext, state: PipelineState)
     context = state.context
     guidelines = state.guidelines
 
-    for finding in findings:
+    for index, finding in enumerate(findings):
         logger.info("Generating fix for: %s", finding.title)
         ctx.set_task("code_gen")
         await ctx.event_bus.emit(
@@ -341,9 +334,7 @@ async def generate_contribution_step(ctx: PipelineContext, state: PipelineState)
                 data={"repo": repo.full_name, "finding": finding.title},
             )
         )
-        contribution = await ctx.generator.generate(
-            finding, context, guidelines=guidelines
-        )
+        contribution = await ctx.generator.generate(finding, context, guidelines=guidelines)
         await ctx.event_bus.emit(
             Event(
                 type=EventType.GENERATION_COMPLETE,
@@ -360,20 +351,17 @@ async def generate_contribution_step(ctx: PipelineContext, state: PipelineState)
             continue
 
         state.contributions.append(contribution)
+        closes_issue = state.closes_issues[index] if index < len(state.closes_issues) else None
+        from contribai.orchestrator.pipeline_core import ContributionEnvelope
+
+        state.contribution_envelopes.append(
+            ContributionEnvelope(contribution=contribution, closes_issue=closes_issue)
+        )
         state.result.contributions_generated += 1
 
         # ── Dry run — record intent but stop before PR submission ─────
         if state.dry_run:
             logger.info("🏃 [DRY RUN] Would create PR: %s", contribution.title)
-            continue
-
-        # ── Human review gate ──────────────────────────────────────────
-        decision = await ctx.reviewer.review(contribution, finding, repo.full_name)
-        if decision.rejected:
-            logger.info("❌ Human rejected: %s", contribution.title)
-            continue
-        if decision.skipped:
-            logger.info("⏭️ Human skipped: %s", contribution.title)
             continue
 
 
@@ -395,20 +383,46 @@ async def submit_pr_step(ctx: PipelineContext, state: PipelineState) -> None:
     repo = state.repo
     guidelines = state.guidelines
 
-    for i, contribution in enumerate(state.contributions):
-        # Parallel-list lookup — analysis mode never populates closes_issues,
-        # so this falls back to None.
-        closes_issue = (
-            state.closes_issues[i] if i < len(state.closes_issues) else None
+    from contribai.orchestrator.pipeline_core import ContributionEnvelope
+
+    envelopes = state.contribution_envelopes or [
+        ContributionEnvelope(
+            contribution=contribution,
+            closes_issue=state.closes_issues[index] if index < len(state.closes_issues) else None,
         )
+        for index, contribution in enumerate(state.contributions)
+    ]
+
+    for envelope in envelopes:
+        contribution = envelope.contribution
+        closes_issue = envelope.closes_issue
+        quota_reserved = False
+        if ctx.pr_quota is not None:
+            quota_reserved = await ctx.pr_quota.try_acquire()
+            if not quota_reserved:
+                logger.warning("PR quota exhausted before publishing %s", contribution.title)
+                break
         try:
             logger.info("📤 Creating PR: %s", contribution.title)
-            pr_result = await ctx.pr_manager.create_pr(
-                contribution,
-                repo,
-                guidelines=guidelines,
-                closes_issue=closes_issue,
-            )
+            if ctx.review_and_publish is None:
+                pr_result = await ctx.pr_manager.create_pr(
+                    contribution,
+                    repo,
+                    guidelines=guidelines,
+                    closes_issue=closes_issue,
+                )
+            else:
+                pr_result = await ctx.review_and_publish(
+                    contribution,
+                    contribution.finding,
+                    repo,
+                    guidelines,
+                    closes_issue=closes_issue,
+                )
+            if pr_result is None:
+                if quota_reserved:
+                    await ctx.pr_quota.release()
+                continue
             state.prs.append(pr_result)
             state.result.prs.append(pr_result)
             state.result.prs_created += 1
@@ -435,22 +449,30 @@ async def submit_pr_step(ctx: PipelineContext, state: PipelineState) -> None:
                 fork=pr_result.fork_full_name,
             )
 
-            # Compliance check — best effort, doesn't block PR submission
-            try:
-                logger.info("🔍 Checking PR compliance...")
-                await ctx.pr_manager.check_compliance_and_fix(
-                    pr_result, contribution, guidelines=guidelines
-                )
-            except Exception as e:
-                logger.warning("Compliance check failed: %s", e)
+            # The legacy compliance helper may perform GitHub mutations.  A
+            # controlled publisher has already bound every write to a permit,
+            # so do not invoke an unscoped post-publish mutation here.
+            if not ctx.controlled_publish:
+                try:
+                    logger.info("🔍 Checking PR compliance...")
+                    await ctx.pr_manager.check_compliance_and_fix(
+                        pr_result, contribution, guidelines=guidelines
+                    )
+                except Exception as e:
+                    logger.warning("Compliance check failed: %s", e)
 
             # CI wait + auto-close — best effort
             try:
-                await _check_ci_and_close_if_failed(ctx.github, ctx.memory, repo, pr_result)
+                if ctx.check_ci is None:
+                    await _check_ci_and_close_if_failed(ctx.github, ctx.memory, repo, pr_result)
+                else:
+                    await ctx.check_ci(pr_result, repo)
             except Exception as e:
                 logger.warning("CI check failed: %s", e)
 
         except Exception as e:
+            if quota_reserved:
+                await ctx.pr_quota.release()
             error = f"PR creation failed for {contribution.title}: {e}"
             logger.error(error)
             state.result.errors.append(error)
@@ -486,7 +508,10 @@ async def solve_issue_step(ctx: PipelineContext, state: PipelineState) -> None:
     from contribai.issues.solver import IssueSolver
 
     solver = ctx.solver or IssueSolver(llm=ctx.llm, github=ctx.github)
-    issues = await solver.fetch_solvable_issues(repo, max_issues=max_prs, max_complexity=3)
+    issue_limit = max_prs if state.issue_number is None else max(max_prs, 20)
+    issues = await solver.fetch_solvable_issues(repo, max_issues=issue_limit, max_complexity=3)
+    if state.issue_number is not None:
+        issues = [issue for issue in issues if issue.number == state.issue_number]
     if not issues:
         logger.info("No solvable issues found in %s", repo.full_name)
         state.skip_reason = "no_findings"
@@ -509,7 +534,7 @@ async def solve_issue_step(ctx: PipelineContext, state: PipelineState) -> None:
 
     # ── Solve each issue — produces a list of findings per issue ──────
     all_findings: list = []
-    closes_per_finding: list[Optional[int]] = []
+    closes_per_finding: list[int | None] = []
     for issue in issues:
         if state.result.prs_created >= max_prs:
             break
@@ -531,9 +556,7 @@ async def solve_issue_step(ctx: PipelineContext, state: PipelineState) -> None:
         for f in findings:
             if f.file_path and f.file_path not in state.relevant_files:
                 try:
-                    content = await ctx.github.get_file_content(
-                        repo.owner, repo.name, f.file_path
-                    )
+                    content = await ctx.github.get_file_content(repo.owner, repo.name, f.file_path)
                     state.relevant_files[f.file_path] = content
                 except Exception:
                     pass
@@ -557,9 +580,7 @@ async def solve_issue_step(ctx: PipelineContext, state: PipelineState) -> None:
     state.closes_issues = closes_per_finding
 
 
-async def validate_issue_findings_step(
-    ctx: PipelineContext, state: PipelineState
-) -> None:
+async def validate_issue_findings_step(ctx: PipelineContext, state: PipelineState) -> None:
     """Step 3 (issue mode) — cap findings by ``max_prs``.
 
     Skips the GitHub dedup and LLM validation that
@@ -606,12 +627,8 @@ def _is_actionable_finding(finding) -> bool:
     if any(part in SKIP_DIRECTORIES for part in path_parts):
         return False
 
-    # Drop protected meta files
-    basename = fp.rsplit("/", 1)[-1] if "/" in fp else fp
-    if basename.upper() in PROTECTED_META_FILES:
-        return False
-
-    return True
+    # Drop invalid or protected paths using the complete normalized path.
+    return not is_invalid_repository_path(fp) and not is_protected_meta_path(fp)
 
 
 # ── Helper: identify key files (used by issue mode) ─────────────────────────
@@ -669,9 +686,7 @@ def identify_key_files(file_tree: list, repo) -> list[str]:
 # ── Helper: fetch relevant files (used by validate_findings_step) ───────────
 
 
-async def _fetch_relevant_files(
-    github, repo, file_paths: list[str]
-) -> dict[str, str]:
+async def _fetch_relevant_files(github, repo, file_paths: list[str]) -> dict[str, str]:
     """Fetch a deduplicated set of file contents.
 
     Best-effort — files that fail to fetch are silently skipped (they were
@@ -730,13 +745,9 @@ async def _dedup_against_past_prs(ctx: PipelineContext, repo, findings: list) ->
     for finding in findings:
         title_lower = finding.title.lower()
         is_title_dup = any(_titles_similar(title_lower, pt) for pt in past_titles_lower)
-        is_file_dup = (
-            finding.file_path in past_file_paths if finding.file_path else False
-        )
+        is_file_dup = finding.file_path in past_file_paths if finding.file_path else False
         if is_title_dup or is_file_dup:
-            logger.info(
-                "⏭️ Skipping duplicate finding: %s", finding.title
-            )
+            logger.info("⏭️ Skipping duplicate finding: %s", finding.title)
             continue
         deduped.append(finding)
     return deduped
@@ -746,7 +757,7 @@ async def _dedup_against_past_prs(ctx: PipelineContext, repo, findings: list) ->
 
 
 async def _validate_findings(
-    llm: "LLMProvider",
+    llm: LLMProvider,
     findings: list,
     relevant_files: dict[str, str],
     *,
@@ -925,7 +936,8 @@ async def _check_ci_and_close_if_failed(
     """Wait for CI checks and auto-close the PR if they fail.
 
     Polls the PR's head commit for combined status. Returns silently on
-    success or timeout — only failure closes the PR (and any linked issues).
+    success or timeout. A failure is recorded, but mutation fails closed until
+    this legacy path receives a permit-bearing publisher command.
     """
     branch = pr_result.branch_name
     fork_parts = pr_result.fork_full_name.split("/")
@@ -933,9 +945,7 @@ async def _check_ci_and_close_if_failed(
     fork_name = fork_parts[1] if len(fork_parts) > 1 else repo.name
 
     try:
-        branch_data = await github._get(
-            f"/repos/{fork_owner}/{fork_name}/git/ref/heads/{branch}"
-        )
+        branch_data = await github._get(f"/repos/{fork_owner}/{fork_name}/git/ref/heads/{branch}")
         head_sha = branch_data["object"]["sha"]
     except Exception:
         logger.debug("Could not get head SHA for CI check, skipping")
@@ -956,20 +966,17 @@ async def _check_ci_and_close_if_failed(
         if status["state"] == "failure":
             failed_names = ", ".join(status["failed"])
             logger.warning("❌ CI failed for PR #%d: %s", pr_result.pr_number, failed_names)
-            comment = (
-                "## Auto-closed: CI checks failed\n\n"
-                f"The following checks failed: **{failed_names}**\n\n"
-                "Closing this PR since required CI checks did not pass. "
-                "Sorry for the inconvenience."
+            logger.warning(
+                "PR #%d was not auto-closed after CI failure: a publisher permit is required",
+                pr_result.pr_number,
             )
-            await github.close_pull_request(repo.owner, repo.name, pr_result.pr_number, comment=comment)
-            await _close_linked_issues(github, repo, pr_result.pr_number, reason="CI checks failed")
             await memory.update_pr_status(repo.full_name, pr_result.pr_number, "ci_failed")
             return
 
     logger.info(
         "⏰ CI check timed out after %ds for PR #%d, leaving open",
-        max_wait_sec, pr_result.pr_number,
+        max_wait_sec,
+        pr_result.pr_number,
     )
 
 
@@ -979,43 +986,23 @@ async def _check_ci_and_close_if_failed(
 async def _close_linked_issues(
     github, repo, pr_number: int, *, reason: str = "PR was closed"
 ) -> None:
-    """Close issues linked to a PR body via Closes/Fixes/Resolves #N."""
-    try:
-        pr_data = await github._get(f"/repos/{repo.owner}/{repo.name}/pulls/{pr_number}")
-        body = pr_data.get("body", "") or ""
-        issue_numbers = re.findall(
-            r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
-            body,
-            re.IGNORECASE,
-        )
-        for issue_num in set(issue_numbers):
-            try:
-                await github.close_issue(
-                    repo.owner,
-                    repo.name,
-                    int(issue_num),
-                    comment=(
-                        f"Auto-closing: linked PR #{pr_number} was closed "
-                        f"({reason}). Sorry for the inconvenience."
-                    ),
-                )
-                logger.info(
-                    "🗑️ Auto-closed issue #%s on %s (linked to PR #%d)",
-                    issue_num, repo.full_name, pr_number,
-                )
-            except Exception:
-                logger.debug("Could not close issue #%s on %s", issue_num, repo.full_name)
-    except Exception:
-        logger.debug("Could not fetch PR #%d body for issue cleanup", pr_number)
+    """Fail closed until issue closure uses a permit-bearing publisher command."""
+    del github
+    logger.warning(
+        "Linked issues on %s were not closed after PR #%d (%s): a publisher permit is required",
+        repo.full_name,
+        pr_number,
+        reason,
+    )
 
 
 __all__ = [
+    "generate_contribution_step",
+    "identify_key_files",
     "load_repo_context_step",
     "run_analysis_step",
-    "validate_findings_step",
-    "generate_contribution_step",
-    "submit_pr_step",
     "solve_issue_step",
+    "submit_pr_step",
+    "validate_findings_step",
     "validate_issue_findings_step",
-    "identify_key_files",
 ]

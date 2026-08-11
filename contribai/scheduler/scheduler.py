@@ -9,11 +9,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from contribai.control.command_service import CommandService
+from contribai.control.mode import ExecutionMode
 from contribai.core.config import ContribAIConfig
+from contribai.orchestrator.memory import Memory
 from contribai.orchestrator.pipeline import ContribPipeline
 
 logger = logging.getLogger(__name__)
@@ -46,9 +50,39 @@ class ContribScheduler:
     async def _run_pipeline(self):
         """Execute a single pipeline run."""
         logger.info("Scheduled pipeline run starting...")
+        mode = ExecutionMode(self.config.scheduler.mode)
+        memory = Memory(self.config.storage.resolved_db_path)
+        await memory.init()
+        try:
+            commands = CommandService(memory)
+            work_item = await commands.submit(
+                "contribai/discovery",
+                mode=mode,
+                idempotency_key=f"scheduler:{datetime.now(UTC).isoformat()}",
+                metadata={"source": "scheduler"},
+            )
+            logger.info("Scheduled command queued as %s (%s)", work_item.id, mode.value)
+            if mode is ExecutionMode.LIVE:
+                from contribai.control.pipeline_executor import PipelineWorkItemExecutor
+                from contribai.control.supervisor import ExecutionSupervisor
+
+                work_item = await ExecutionSupervisor(
+                    memory,
+                    executor=PipelineWorkItemExecutor(self.config),
+                    commands=commands,
+                ).run_once(work_item.id)
+                logger.info(
+                    "Scheduled LIVE WorkItem %s finished in state %s",
+                    work_item.id,
+                    work_item.state.value,
+                )
+        finally:
+            await memory.close()
+        if mode is ExecutionMode.LIVE:
+            return
         pipeline = ContribPipeline(self.config)
         try:
-            result = await pipeline.run()
+            result = await pipeline.run(dry_run=mode.dry_run)
             logger.info(
                 "Scheduled run complete: %d repos analyzed, %d PRs created, %d errors",
                 result.repos_analyzed,

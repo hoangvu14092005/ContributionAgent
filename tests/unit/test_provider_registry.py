@@ -22,11 +22,11 @@ import pytest
 from contribai.core.config import LLMConfig
 from contribai.core.exceptions import LLMError
 from contribai.llm import (
+    LLM_PROVIDERS,
     AnthropicProvider,
     CopilotProvider,
     CustomProvider,
     GeminiProvider,
-    LLM_PROVIDERS,
     OllamaProvider,
     OpenAIProvider,
     available_providers,
@@ -34,7 +34,6 @@ from contribai.llm import (
     register_provider,
 )
 from contribai.llm.provider import LLMProvider
-
 
 # ── Built-in providers ───────────────────────────────────────────────────────
 
@@ -201,8 +200,6 @@ def patch_provider_init(cls):
     comes back from :func:`make_provider`, not that the SDK works.
     """
     from unittest.mock import patch
-
-    init = getattr(cls, "__init__")
 
     def _passthrough(self, config):
         self.config = config

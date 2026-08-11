@@ -371,7 +371,7 @@ ContribAI is a mature autonomous AI contribution system with a robust foundation
 - **API provider lock-in:** Multi-provider support baked in from v0.7
 - **GitHub breaking changes:** Monitor API deprecations, test in CI
 - **Security vulnerabilities:** `pip-audit` in CI, auto-dependency updates
-- **License compliance:** AGPL-3.0 + Commons Clause enforced
+- **License compliance:** MIT license is the single project license
 
 ---
 

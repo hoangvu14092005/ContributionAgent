@@ -41,8 +41,7 @@ htmlcov/
 *.log
 logs/
 
-# Claude agent specs (do NOT commit agent workflow files)
-.agents/
+# .agents is product-owned skill metadata and must remain version-controlled.
 
 # Repomix auto-generated snapshots
 repomix-output.xml

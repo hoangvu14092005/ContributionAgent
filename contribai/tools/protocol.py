@@ -106,15 +106,13 @@ class GitHubTool:
                 )
                 return ToolResult(success=True, data=content)
             elif action == "create_pr":
-                result = await self._client.create_pull_request(
-                    kwargs["owner"],
-                    kwargs["repo"],
-                    kwargs["title"],
-                    kwargs["body"],
-                    kwargs["head"],
-                    kwargs.get("base"),
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "Direct tool PR writes are disabled; "
+                        "use GitHubPublisher with a valid permit"
+                    ),
                 )
-                return ToolResult(success=True, data=result)
             elif action == "get_user":
                 user = await self._client.get_authenticated_user()
                 return ToolResult(success=True, data=user)

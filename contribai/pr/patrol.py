@@ -6,18 +6,29 @@ classify feedback, generates code fixes, and pushes updates.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from typing import TYPE_CHECKING
 
 import yaml
 
+from contribai.control.mode import ExecutionMode
 from contribai.core.models import (
     FeedbackAction,
     FeedbackItem,
     PatrolResult,
 )
 from contribai.core.text_utils import strip_think_blocks
+from contribai.domain.work_item import BudgetSnapshot, WorkItem
 from contribai.github.client import GitHubClient
 from contribai.llm.provider import LLMProvider
+from contribai.review.dynamic_context import build_dynamic_review_context
+from contribai.storage.work_items import DuplicateWorkItemError, WorkItemRepository
+
+if TYPE_CHECKING:
+    from contribai.context.rules import ResolvedRepoRules
+    from contribai.core.models import Issue
+    from contribai.verification.models import VerificationReport
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +64,13 @@ class PRPatrol:
         self,
         github: GitHubClient,
         llm: LLMProvider,
+        *,
+        work_items: WorkItemRepository | None = None,
     ):
         self._github = github
         self._llm = llm
         self._user: dict | None = None
+        self._work_items = work_items
 
     async def _get_user(self) -> dict:
         if not self._user:
@@ -510,98 +524,55 @@ class PRPatrol:
         pr_data: dict,
         feedback: FeedbackItem,
     ) -> bool:
-        """Generate and push a code fix based on review feedback."""
+        """Fail closed until patrol receives a permit-bearing publisher command."""
+        await self._enqueue_feedback_work_item(owner, repo, pr_data, feedback)
+        logger.warning(
+            "Review fix for %s/%s#%s was not applied: a publisher permit is required",
+            owner,
+            repo,
+            pr_data.get("number", "?"),
+        )
+        return False
+
+    async def _enqueue_feedback_work_item(
+        self,
+        owner: str,
+        repo: str,
+        pr_data: dict,
+        feedback: FeedbackItem,
+    ) -> str | None:
+        """Create a durable repair WorkItem instead of mutating a PR in patrol."""
+        if self._work_items is None:
+            return None
+        pr_number = int(pr_data.get("number", 0))
+        identity = f"{owner}/{repo}#{pr_number}:{feedback.comment_id}"
+        work_id = f"feedback-{hashlib.sha256(identity.encode()).hexdigest()[:32]}"
+        item = WorkItem.new(
+            work_id=work_id,
+            repo=f"{owner}/{repo}",
+            issue_number=None,
+            mode=ExecutionMode.REVIEW_ONLY,
+            budget=BudgetSnapshot.empty(),
+        )
         try:
-            # Get the PR branch and fork info
-            head = pr_data.get("head", {})
-            fork_owner = head.get("repo", {}).get("owner", {}).get("login", owner)
-            fork_repo = head.get("repo", {}).get("name", repo)
-            branch = head.get("ref", "main")
-
-            # Get file content if inline comment
-            file_content = ""
-            file_path = feedback.file_path
-            if file_path:
-                try:
-                    file_content = await self._github.get_file_content(
-                        fork_owner, fork_repo, file_path, ref=branch
-                    )
-                except Exception:
-                    logger.warning("Could not fetch file: %s", file_path)
-
-            # Get PR diff for context
-            try:
-                diff = await self._github.get_pr_diff(owner, repo, pr_data["number"])
-                # Truncate diff if too long
-                if len(diff) > 8000:
-                    diff = diff[:8000] + "\n... (truncated)"
-            except Exception:
-                diff = ""
-
-            # Generate fix via LLM
-            prompt = self._build_fix_prompt(feedback, file_content, file_path, diff)
-            response = await self._llm.complete(
-                prompt,
-                system=(
-                    "You are a developer fixing code based on a PR review comment. "
-                    "Return ONLY the complete fixed file content. No explanations. "
-                    "Make the MINIMUM change to address the feedback."
-                ),
-                temperature=0.2,
-            )
-
-            # Extract fixed content
-            fixed_content = self._extract_fixed_content(response)
-            if not fixed_content or not file_path:
-                logger.warning("  ⚠️ Could not generate fix for: %s", feedback.body[:60])
-                return False
-
-            if fixed_content.strip() == file_content.strip():
-                logger.info("  [info] No changes needed for: %s", feedback.body[:60])
-                return False
-
-            # Get file SHA for update
-            try:
-                resp = await self._github._get(
-                    f"/repos/{fork_owner}/{fork_repo}/contents/{file_path}",
-                    params={"ref": branch},
-                )
-                sha = resp.get("sha")
-            except Exception:
-                sha = None
-
-            # Push fix
-            user = await self._get_user()
-            signoff = self._build_signoff(user)
-            commit_msg = f"fix: address review feedback — {feedback.body[:60]}"
-            await self._github.create_or_update_file(
-                fork_owner,
-                fork_repo,
-                file_path,
-                fixed_content,
-                commit_msg,
-                branch,
-                sha=sha,
-                signoff=signoff,
-            )
-            logger.info("  ✅ Pushed fix for %s: %s", file_path, feedback.body[:60])
-
-            # Reply to comment
-            reply_body = (
-                f"Addressed this feedback in commit `{commit_msg[:50]}`. Thanks for the review!"
-            )
-            if feedback.is_inline:
-                await self._github.create_pr_review_comment_reply(
-                    owner, repo, pr_data["number"], feedback.comment_id, reply_body
-                )
-            else:
-                await self._github.create_pr_comment(owner, repo, pr_data["number"], reply_body)
-
-            return True
-
-        except Exception as e:
-            logger.error("  ❌ Failed to fix: %s", e)
-            return False
+            await self._work_items.create(item)
+        except DuplicateWorkItemError:
+            return work_id
+        await self._work_items.append_event(
+            work_id,
+            "feedback_received",
+            expected_version=item.version,
+            payload={
+                "pull_request": pr_number,
+                "comment_id": feedback.comment_id,
+                "author": feedback.author,
+                "action": feedback.action.value,
+                "file_path": feedback.file_path or "",
+                "line": feedback.line or 0,
+                "body": feedback.body[:2_000],
+            },
+        )
+        return work_id
 
     def _build_fix_prompt(
         self,
@@ -609,9 +580,23 @@ class PRPatrol:
         file_content: str,
         file_path: str | None,
         diff: str,
+        *,
+        repo_rules: ResolvedRepoRules | str | None = None,
+        issue: Issue | str | None = None,
+        verification: VerificationReport | list[str] | None = None,
     ) -> str:
         """Build the LLM prompt to generate a code fix."""
         parts = [f"A reviewer left this feedback on a pull request:\n\n> {feedback.body}"]
+
+        dynamic_context = build_dynamic_review_context(
+            diff=diff,
+            files={file_path: file_content} if file_path and file_content else {},
+            repo_rules=repo_rules,
+            issue=issue,
+            verification=verification,
+        )
+        if dynamic_context.text:
+            parts.append(f"\nDynamic review context:\n{dynamic_context.text}")
 
         if feedback.bot_context:
             parts.append(
@@ -660,91 +645,27 @@ class PRPatrol:
         pr_data: dict,
         feedback: FeedbackItem,
     ) -> bool:
-        """Answer a maintainer's question on the PR."""
-        try:
-            # Get PR context
-            pr_body = pr_data.get("body", "")
-            pr_title = pr_data.get("title", "")
-
-            prompt = (
-                f"A maintainer asked this question on our pull request:\n\n"
-                f"PR title: {pr_title}\n"
-                f"PR description:\n{pr_body[:2000]}\n\n"
-                f"Question from @{feedback.author}:\n> {feedback.body}\n\n"
-                f"Write a concise, helpful reply (2-4 sentences). "
-                f"Be polite and professional. Explain the reasoning behind our change."
-            )
-
-            response = await self._llm.complete(
-                prompt,
-                system=(
-                    "You are a developer responding to a code review question. "
-                    "Be concise, professional, and helpful."
-                ),
-                temperature=0.3,
-            )
-
-            reply_body = response.strip()
-            if not reply_body:
-                return False
-
-            # Post reply
-            if feedback.is_inline:
-                await self._github.create_pr_review_comment_reply(
-                    owner, repo, pr_data["number"], feedback.comment_id, reply_body
-                )
-            else:
-                await self._github.create_pr_comment(owner, repo, pr_data["number"], reply_body)
-
-            logger.info(
-                "  💬 Replied to @%s on PR #%d",
-                feedback.author,
-                pr_data["number"],
-            )
-            return True
-
-        except Exception as e:
-            logger.error("  ❌ Failed to reply: %s", e)
-            return False
+        """Fail closed until patrol receives a permit-bearing publisher command."""
+        await self._enqueue_feedback_work_item(owner, repo, pr_data, feedback)
+        logger.warning(
+            "Reply to @%s on %s/%s#%s was not posted: a publisher permit is required",
+            feedback.author,
+            owner,
+            repo,
+            pr_data.get("number", "?"),
+        )
+        return False
 
     # ── CLA re-check ─────────────────────────────────────────────────────
 
     async def _handle_cla_recheck(self, owner: str, repo: str, pr_number: int) -> bool:
-        """Re-sign CLA if needed after pushing new commits."""
-        import asyncio
-
-        # Wait for CLA bots to react to new commits
-        await asyncio.sleep(10)
-
-        try:
-            comments = await self._github.get_pr_comments(owner, repo, pr_number)
-        except Exception:
-            return False
-
-        for comment in comments:
-            login = comment.get("user", {}).get("login", "")
-            body = comment.get("body", "").lower()
-            is_bot = comment.get("user", {}).get("type") == "Bot"
-
-            if not is_bot:
-                continue
-
-            # Check if CLA bot is asking for re-signing
-            if any(kw in login.lower() for kw in ["cla", "claassistant"]) or any(
-                kw in body for kw in ["sign our cla", "cla not signed", "please sign"]
-            ):
-                try:
-                    await self._github.create_pr_comment(
-                        owner,
-                        repo,
-                        pr_number,
-                        "I have read the CLA Document and I hereby sign the CLA",
-                    )
-                    logger.info("  ✍️ Re-signed CLA on PR #%d", pr_number)
-                    return True
-                except Exception as e:
-                    logger.warning("  CLA re-sign failed: %s", e)
-
+        """Fail closed because CLA comments are GitHub writes requiring a permit."""
+        logger.warning(
+            "CLA re-sign on %s/%s#%d was not posted: a publisher permit is required",
+            owner,
+            repo,
+            pr_number,
+        )
         return False
 
     async def _close_linked_issues_from_body(
@@ -754,11 +675,9 @@ class PRPatrol:
         pr_number: int,
         pr_data: dict,
     ) -> None:
-        """Close issues linked from the PR body when PR is closed without merge.
+        """Report linked issues that require a permit-bearing close command.
 
-        When our PR is rejected/closed, the auto-created issue stays open —
-        this is spam to the repo. Extract linked issue numbers from the PR
-        body (Closes/Fixes/Resolves #N) and close them.
+        This patrol path intentionally performs no GitHub mutation.
         """
         import re
 
@@ -770,22 +689,11 @@ class PRPatrol:
         )
 
         for issue_num in set(issue_numbers):
-            try:
-                await self._github.close_issue(
-                    owner,
-                    repo,
-                    int(issue_num),
-                    comment=(
-                        f"Auto-closing: linked PR #{pr_number} was closed. "
-                        "Sorry for the inconvenience."
-                    ),
-                )
-                logger.info(
-                    "🗑️ Auto-closed issue #%s on %s/%s (PR #%d closed)",
-                    issue_num,
-                    owner,
-                    repo,
-                    pr_number,
-                )
-            except Exception:
-                logger.debug("Could not close issue #%s on %s/%s", issue_num, owner, repo)
+            logger.warning(
+                "Linked issue #%s on %s/%s was not closed after PR #%d: "
+                "a publisher permit is required",
+                issue_num,
+                owner,
+                repo,
+                pr_number,
+            )

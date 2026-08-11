@@ -15,8 +15,7 @@ from __future__ import annotations
 import pytest
 
 from contribai.analysis.repo_conventions import RepoConventions
-from contribai.generator.style_validator import StyleValidator, StyleValidationResult
-
+from contribai.generator.style_validator import StyleValidationResult, StyleValidator
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -28,7 +27,7 @@ def validator() -> StyleValidator:
 
 @pytest.fixture
 def python_snake_conventions() -> RepoConventions:
-    """A typical Python repo: snake_case, 4 spaces, double quotes, line-length 100, type hints, docstrings."""
+    """A typical Python repo with standard Python naming and formatting conventions."""
     return RepoConventions(
         naming_convention="snake_case",
         indentation="4 spaces",
@@ -73,9 +72,7 @@ class TestStyleValidatorReturns:
         result = validator.validate("x = 1\n", python_snake_conventions)
         assert isinstance(result.passed, bool)
 
-    def test_result_issues_and_warnings_are_lists(
-        self, validator, python_snake_conventions
-    ):
+    def test_result_issues_and_warnings_are_lists(self, validator, python_snake_conventions):
         result = validator.validate("x = 1\n", python_snake_conventions)
         assert isinstance(result.issues, list)
         assert isinstance(result.warnings, list)
@@ -94,7 +91,7 @@ class TestPassThreshold:
             "from typing import List\n"
             "\n"
             "\n"
-            'def add_items(items: List[int]) -> int:\n'
+            "def add_items(items: List[int]) -> int:\n"
             '    """Add a list of items.\n'
             "\n"
             "    Args:\n"
@@ -103,7 +100,7 @@ class TestPassThreshold:
             "    Returns:\n"
             "        The sum.\n"
             '    """\n'
-            '    return sum(items)\n'
+            "    return sum(items)\n"
         )
         result = validator.validate(perfect_code, python_snake_conventions)
         assert result.passed is True
@@ -202,14 +199,7 @@ class TestLineLengthCheck:
 class TestPythonSpecificChecks:
     def test_no_hints_with_hint_repo_warns(self, validator, python_snake_conventions):
         # 3 functions, 0 hints → ratio 0 < 0.5 → warning.
-        code = (
-            "def a(x):\n"
-            "    return x\n"
-            "def b(x):\n"
-            "    return x\n"
-            "def c(x):\n"
-            "    return x\n"
-        )
+        code = "def a(x):\n    return x\ndef b(x):\n    return x\ndef c(x):\n    return x\n"
         result = validator.validate(code, python_snake_conventions)
         assert any("type hint" in w.lower() for w in result.warnings)
 
@@ -223,11 +213,7 @@ class TestPythonSpecificChecks:
         assert not any("type hint" in w.lower() for w in result.warnings)
 
     def test_no_docstrings_warns(self, validator, python_snake_conventions):
-        code = (
-            "def a(x):\n    return x\n"
-            "def b(x):\n    return x\n"
-            "def c(x):\n    return x\n"
-        )
+        code = "def a(x):\n    return x\ndef b(x):\n    return x\ndef c(x):\n    return x\n"
         result = validator.validate(code, python_snake_conventions)
         assert any("docstring" in w.lower() for w in result.warnings)
 
@@ -240,9 +226,7 @@ class TestPythonSpecificChecks:
         result = validator.validate(code, python_snake_conventions)
         assert not any("docstring" in w.lower() for w in result.warnings)
 
-    def test_non_python_repo_skips_hint_and_doc_checks(
-        self, validator, javascript_conventions
-    ):
+    def test_non_python_repo_skips_hint_and_doc_checks(self, validator, javascript_conventions):
         # JS repo: has_type_hints=False, has_docstrings=False → both checks skipped.
         code = "function foo(x) { return x; }\n"
         result = validator.validate(code, javascript_conventions)

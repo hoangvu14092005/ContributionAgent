@@ -13,7 +13,7 @@ python -m venv .venv
 pip install -e ".[dev]"
 
 # Verify
-pytest tests/ -v  # 431 tests must pass
+pytest tests/ -v  # Full suite must pass
 contribai --help
 ```
 
@@ -41,7 +41,7 @@ contribai --help
 
 5. **Run tests**:
    ```bash
-   pytest tests/ -v  # 431 tests
+   pytest tests/ -v  # Full suite
    ```
 
 6. **Commit** with conventional messages + DCO signoff:

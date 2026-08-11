@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Contribution control plane**: WorkItem/CommandService entry paths, isolated
+  engine leases, PatchCollector, verification/review gates, proof-bound
+  PublishPermit, and GitHubPublisher-only write authority
+- **External EngineDriver adapters**: optional Mini-SWE, OpenHands SDK, OpenCode
+  server, Codex exec, and Codex app-server boundaries with shared contract tests
+- **Outcome learning and Contribution Value benchmarks**: evidence-thresholded
+  repository preferences plus localization, verification, cost, acceptance,
+  merge, review-latency, and policy metrics
+- **MIT LICENSE** and packaging/Docker architecture contracts
 - **Skills harvesting from agent frameworks**: Adapted high-value workflows, agents, and knowledge references from OpenHands, Haystack, MetaGPT, LangChain, and CrewAI into `.agents/`. 12 new skill markdown files bring the total to **30 skills** across 3 categories
   - 6 new workflows: `address_pr_comments`, `update_pr_description`, `update_test`, `agent-builder`, `agent_memory`, `add_agent`
   - 4 new agents: `codereview-roasted` (Linus-style brutal reviewer), `security-patterns`, `code-review-patterns`, `github-ops`

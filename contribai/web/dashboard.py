@@ -140,11 +140,11 @@ a:hover {{ text-decoration: underline; }}
   </div>
 
   <div class="actions">
-    <button class="btn btn-primary" onclick="triggerRun(false)">
-      Run Pipeline
+    <button class="btn btn-primary" onclick="triggerRun('review_only')">
+      Review Run
     </button>
-    <button class="btn btn-secondary" onclick="triggerRun(true)">
-      Dry Run
+    <button class="btn btn-secondary" onclick="triggerRun('shadow')">
+      Shadow Run
     </button>
     <span id="status"></span>
   </div>
@@ -173,17 +173,17 @@ a:hover {{ text-decoration: underline; }}
 </div>
 
 <script>
-async function triggerRun(dryRun) {{
+async function triggerRun(mode) {{
   const el = document.getElementById('status');
   el.textContent = 'Starting...';
   try {{
     const res = await fetch('/api/run', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{dry_run: dryRun}})
+      body: JSON.stringify({{mode: mode}})
     }});
     const data = await res.json();
-    el.textContent = dryRun ? 'Dry run started' : 'Pipeline started';
+    el.textContent = mode === 'shadow' ? 'Shadow run started' : 'Review run started';
     setTimeout(() => el.textContent = '', 5000);
   }} catch (e) {{
     el.textContent = 'Error: ' + e.message;
