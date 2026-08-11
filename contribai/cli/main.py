@@ -66,6 +66,24 @@ async def _submit_control_command(
         await memory.close()
 
 
+async def _execute_live_work_item(config, work_id: str):
+    """Run one queued LIVE WorkItem through the durable execution supervisor."""
+    from contribai.control.pipeline_executor import PipelineWorkItemExecutor
+    from contribai.control.supervisor import ExecutionSupervisor
+    from contribai.orchestrator.memory import Memory
+
+    memory = Memory(config.storage.resolved_db_path)
+    await memory.init()
+    try:
+        supervisor = ExecutionSupervisor(
+            memory,
+            executor=PipelineWorkItemExecutor(config),
+        )
+        return await supervisor.run_once(work_id)
+    finally:
+        await memory.close()
+
+
 def setup_logging(verbose: bool = False):
     level = logging.DEBUG if verbose else logging.INFO
     handlers: list[logging.Handler] = [
@@ -195,10 +213,8 @@ def run(ctx, language, stars, max_prs, dry_run, human_review, events_log):
     console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")
 
     if execution_mode is ExecutionMode.LIVE:
-        console.print(
-            "   [yellow]LIVE request queued. Legacy direct publishing is disabled; "
-            "a control-plane worker must process this WorkItem.[/yellow]"
-        )
+        final_item = asyncio.run(_execute_live_work_item(config, work_item.id))
+        console.print(f"   ✅ LIVE WorkItem finished in state: {final_item.state.value}")
         return
 
     from contribai.orchestrator.pipeline import ContribPipeline
@@ -257,10 +273,8 @@ def target(ctx, url, types, dry_run, human_review):
     console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")
 
     if execution_mode is ExecutionMode.LIVE:
-        console.print(
-            "   [yellow]LIVE request queued. Legacy direct publishing is disabled; "
-            "a control-plane worker must process this WorkItem.[/yellow]"
-        )
+        final_item = asyncio.run(_execute_live_work_item(config, work_item.id))
+        console.print(f"   ✅ LIVE WorkItem finished in state: {final_item.state.value}")
         return
 
     from contribai.orchestrator.pipeline import ContribPipeline
@@ -342,10 +356,8 @@ def hunt(ctx, rounds, delay, language, mode, dry_run, human_review, events_log):
     console.print(f"   🧭 WorkItem: {work_item.id} ({execution_mode.value})")
 
     if execution_mode is ExecutionMode.LIVE:
-        console.print(
-            "   [yellow]LIVE request queued. Legacy direct publishing is disabled; "
-            "a control-plane worker must process this WorkItem.[/yellow]"
-        )
+        final_item = asyncio.run(_execute_live_work_item(config, work_item.id))
+        console.print(f"   ✅ LIVE WorkItem finished in state: {final_item.state.value}")
         return
 
     from contribai.orchestrator.pipeline import ContribPipeline

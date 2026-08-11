@@ -85,7 +85,7 @@ class PatchCandidate:
     is_deleted: bool = False
 
     def __post_init__(self) -> None:
-        if self.content is None and self.patch is None:
+        if self.content is None and self.patch is None and not self.is_deleted:
             raise ValueError("PatchCandidate requires content or patch")
         if self.content is not None and self.patch is not None:
             raise ValueError("PatchCandidate cannot contain both content and patch")

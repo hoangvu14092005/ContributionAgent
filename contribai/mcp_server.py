@@ -415,15 +415,32 @@ async def _get_open_issues(args: dict) -> list[types.TextContent]:
 
 
 async def _submit_work(args: dict) -> list[types.TextContent]:
-    """Queue a command; MCP never receives a GitHub write client for this path."""
+    """Submit a command and execute LIVE work through the control-plane worker."""
     commands = await get_commands()
+    mode = ExecutionMode(args.get("mode", ExecutionMode.SHADOW))
     item = await commands.submit(
         args["repo"],
         issue_number=args.get("issue_number"),
-        mode=ExecutionMode(args.get("mode", ExecutionMode.SHADOW)),
+        mode=mode,
         idempotency_key=args.get("idempotency_key"),
         metadata={"source": "mcp.submit_work"},
     )
+    if mode is ExecutionMode.LIVE:
+        from contribai.control.pipeline_executor import PipelineWorkItemExecutor
+        from contribai.control.supervisor import ExecutionSupervisor
+
+        item = await ExecutionSupervisor(
+            await get_memory(),
+            executor=PipelineWorkItemExecutor(_config),
+            commands=commands,
+        ).run_once(item.id)
+        return _ok(
+            status="processed",
+            work_id=item.id,
+            repo=item.repo,
+            mode=item.mode,
+            state=item.state,
+        )
     return _ok(status="queued", work_id=item.id, repo=item.repo, mode=item.mode)
 
 

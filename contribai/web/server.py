@@ -92,6 +92,27 @@ async def _webhook_event_handler(
         )
 
 
+async def _execute_work_item(config: ContribAIConfig, work_id: str):
+    """Execute one durable LIVE WorkItem without handing write authority to the engine."""
+    from contribai.control.pipeline_executor import PipelineWorkItemExecutor
+    from contribai.control.supervisor import ExecutionSupervisor
+
+    memory = _memory
+    owns_memory = False
+    if memory is None:
+        memory = Memory(config.storage.resolved_db_path)
+        await memory.init()
+        owns_memory = True
+    try:
+        return await ExecutionSupervisor(
+            memory,
+            executor=PipelineWorkItemExecutor(config),
+        ).run_once(work_id)
+    finally:
+        if owns_memory:
+            await memory.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup shared resources."""
@@ -180,16 +201,35 @@ async def get_runs(limit: int = 20):
 # ── Execution endpoints (live mode requires API key) ─
 
 
-async def _background_run(repo_url: str | None, mode: ExecutionMode):
+async def _background_run(
+    repo_url: str | None,
+    mode: ExecutionMode,
+    work_id: str | None = None,
+):
     """Execute pipeline in background."""
     mode = ExecutionMode(mode)
     config = load_config()
-    work_item = await _submit_control_command(config, repo_url, mode, source="web.run")
-    if mode is ExecutionMode.LIVE:
+    if mode is ExecutionMode.LIVE and work_id is not None:
+        final_item = await _execute_work_item(config, work_id)
         logger.info(
-            "Queued LIVE web WorkItem %s; legacy direct publishing is disabled",
-            work_item.id if work_item else "<unavailable>",
+            "LIVE web WorkItem %s finished in state %s",
+            final_item.id,
+            getattr(final_item.state, "value", final_item.state),
         )
+        return
+    work_item = (
+        await _submit_control_command(config, repo_url, mode, source="web.run")
+        if work_id is None
+        else None
+    )
+    if mode is ExecutionMode.LIVE:
+        if work_item is not None:
+            final_item = await _execute_work_item(config, work_item.id)
+            logger.info(
+                "LIVE web WorkItem %s finished in state %s",
+                final_item.id,
+                getattr(final_item.state, "value", final_item.state),
+            )
         return
     pipeline = ContribPipeline(config)
     try:
@@ -219,6 +259,7 @@ async def trigger_run(
         item = await _submit_control_command(config, None, request.mode, source="web.run")
         if item is None:
             raise HTTPException(status_code=503, detail="control plane is not initialized")
+        background_tasks.add_task(_background_run, None, request.mode, item.id)
         return {"status": "queued", "mode": request.mode, "work_id": item.id}
     background_tasks.add_task(_background_run, None, request.mode)
     return {"status": "started", "mode": request.mode}
@@ -244,6 +285,7 @@ async def trigger_target(
         )
         if item is None:
             raise HTTPException(status_code=503, detail="control plane is not initialized")
+        background_tasks.add_task(_background_run, request.repo_url, request.mode, item.id)
         return {
             "status": "queued",
             "repo_url": request.repo_url,
@@ -260,6 +302,7 @@ async def trigger_target(
 
 @app.post("/api/work-items")
 async def submit_work_item(
+    background_tasks: BackgroundTasks,
     request: RunRequest,
     presented_key: str | None = Depends(get_presented_api_key),
 ):
@@ -272,6 +315,8 @@ async def submit_work_item(
     )
     if item is None:
         raise HTTPException(status_code=503, detail="control plane is not initialized")
+    if request.mode is ExecutionMode.LIVE:
+        background_tasks.add_task(_background_run, request.repo_url, request.mode, item.id)
     return {"status": "queued", "work_id": item.id, "repo": item.repo, "mode": item.mode}
 
 

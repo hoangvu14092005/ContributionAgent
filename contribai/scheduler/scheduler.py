@@ -54,20 +54,31 @@ class ContribScheduler:
         memory = Memory(self.config.storage.resolved_db_path)
         await memory.init()
         try:
-            work_item = await CommandService(memory).submit(
+            commands = CommandService(memory)
+            work_item = await commands.submit(
                 "contribai/discovery",
                 mode=mode,
                 idempotency_key=f"scheduler:{datetime.now(UTC).isoformat()}",
                 metadata={"source": "scheduler"},
             )
             logger.info("Scheduled command queued as %s (%s)", work_item.id, mode.value)
+            if mode is ExecutionMode.LIVE:
+                from contribai.control.pipeline_executor import PipelineWorkItemExecutor
+                from contribai.control.supervisor import ExecutionSupervisor
+
+                work_item = await ExecutionSupervisor(
+                    memory,
+                    executor=PipelineWorkItemExecutor(self.config),
+                    commands=commands,
+                ).run_once(work_item.id)
+                logger.info(
+                    "Scheduled LIVE WorkItem %s finished in state %s",
+                    work_item.id,
+                    work_item.state.value,
+                )
         finally:
             await memory.close()
         if mode is ExecutionMode.LIVE:
-            logger.info(
-                "Scheduled LIVE WorkItem %s queued; legacy direct publishing is disabled",
-                work_item.id,
-            )
             return
         pipeline = ContribPipeline(self.config)
         try:

@@ -90,7 +90,8 @@ def test_live_accepts_valid_api_key():
         "mode": "live",
         "work_id": "work-queued",
     }
-    background_run.assert_not_awaited()
+    background_run.assert_awaited_once()
+    assert background_run.await_args.args == (None, "live", "work-queued")
 
 
 def test_target_run_binds_repo_and_mode_from_json_body():
@@ -167,9 +168,11 @@ def test_live_rejects_api_key_in_query_string():
 async def test_background_live_queues_without_legacy_pipeline():
     pipeline = MagicMock()
     pipeline.run = AsyncMock()
+    execute_work_item = AsyncMock(return_value=MagicMock(id="work-live", state="closed"))
     with (
         patch("contribai.web.server.load_config", return_value=MagicMock()),
         patch("contribai.web.server.ContribPipeline", return_value=pipeline),
+        patch("contribai.web.server._execute_work_item", execute_work_item),
         patch(
             "contribai.web.server._submit_control_command",
             AsyncMock(return_value=MagicMock(id="work-live")),
@@ -179,3 +182,4 @@ async def test_background_live_queues_without_legacy_pipeline():
 
         await _background_run(None, "live")
     pipeline.run.assert_not_awaited()
+    execute_work_item.assert_awaited_once()
