@@ -8,7 +8,7 @@
 # Script này CHỈ ĐỌC — không sửa file, không gọi GitHub API ghi, không tạo PR.
 # Gửi lại contribai_verify.log để phân tích tiếp.
 # ============================================================================
-set -uo pipefail
+set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
@@ -27,27 +27,26 @@ echo "--- cấu hình phần cứng (để đối chiếu số liệu hiệu su�
 sysctl -n hw.model hw.ncpu hw.memsize 2>/dev/null || nproc
 
 sec "1. Lint — ruff check"
-"$PY" -m ruff check contribai/ tests/ --statistics 2>&1 | tail -30
+"$PY" -m ruff check contribai/ tests/ --statistics
 echo "--- tổng số lỗi ---"
-"$PY" -m ruff check contribai/ tests/ 2>&1 | tail -3
+"$PY" -m ruff check contribai/ tests/
 
 sec "2. Format — ruff format --check"
-"$PY" -m ruff format --check contribai/ tests/ 2>&1 | tail -5
+"$PY" -m ruff format --check contribai/ tests/
 
 sec "3. Test suite đầy đủ (đây là số liệu quan trọng nhất)"
-time "$PY" -m pytest -q --timeout=300 2>&1 | tail -60
+time "$PY" -m pytest -q --timeout=300
 
-sec "4. Danh sách test THẤT BẠI (nếu có)"
-"$PY" -m pytest -q 2>&1 | grep -E "^(FAILED|ERROR)" | head -50
-echo "(nếu trống nghĩa là toàn bộ test pass)"
+sec "4. Test suite đã pass ở section 3"
+echo "Không chạy lại suite để tránh che exit code hoặc tạo số liệu khác nhau."
 
 sec "5. Coverage THẬT (bỏ qua danh sách omit để thấy bức tranh đầy đủ)"
 "$PY" -m pytest -q \
   --cov=contribai --cov-report=term-missing:skip-covered \
-  --cov-config=/dev/null 2>&1 | tail -60
+  --cov-config=/dev/null
 
 sec "6. Coverage theo cấu hình dự án (để đối chiếu ngưỡng CI 50%)"
-"$PY" -m pytest -q --cov=contribai --cov-report=term 2>&1 | tail -30
+"$PY" -m pytest -q --cov=contribai --cov-report=term
 
 sec "7. Test chạy chậm nhất (điểm nghẽn hiệu suất trong test)"
 "$PY" -m pytest -q --durations=25 2>&1 | tail -32
@@ -94,24 +93,26 @@ for nlines in (500, 1500, 3000):
     print(f"  file {nlines:>5} dòng, search 15 dòng → {time.perf_counter()-t0:6.2f}s")
 PYEOF
 
-sec "11. Xác minh cổng an toàn — dry_run có thực sự chặn create_pr không?"
+sec "11. Xác minh cổng an toàn — LIVE có đi qua supervisor/publish gate không?"
 "$PY" - <<'PYEOF'
-import asyncio, inspect
-from unittest.mock import AsyncMock, MagicMock
+import inspect
 try:
     from contribai.orchestrator import steps as S
-    src = inspect.getsource(S.generate_contribution_step)
-    i_append = src.find("state.contributions.append")
-    i_review = src.find("ctx.reviewer.review")
-    print(f"  vị trí 'contributions.append' trong hàm: {i_append}")
-    print(f"  vị trí 'reviewer.review'       trong hàm: {i_review}")
-    if 0 <= i_append < i_review:
-        print("  ❌ XÁC NHẬN LỖI P0-1: contribution được thêm TRƯỚC khi review →")
-        print("     submit_pr_step sẽ tạo PR ngay cả khi người dùng từ chối.")
+    from contribai.control.pipeline_executor import PipelineWorkItemExecutor
+    from contribai.control.supervisor import ExecutionSupervisor
+
+    submit_src = inspect.getsource(S.submit_pr_step)
+    if (
+        "ctx.review_and_publish" in submit_src
+        and "ctx.controlled_publish" in submit_src
+        and ExecutionSupervisor
+        and PipelineWorkItemExecutor
+    ):
+        print("  ✅ LIVE path có supervisor, controlled publisher và review boundary.")
     else:
-        print("  ✅ Thứ tự đúng — lỗi P0-1 đã được sửa.")
+        raise SystemExit("  ❌ Thiếu control-plane publish boundary.")
 except Exception as e:
-    print("  không kiểm tra được:", e)
+    raise SystemExit(f"  ❌ không kiểm tra được: {e}") from e
 PYEOF
 
 sec "12. Xác minh middleware chain / quality scorer có được gọi không"

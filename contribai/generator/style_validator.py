@@ -26,13 +26,16 @@ class StyleValidationResult:
     issues: list[str]
     warnings: list[str]
 
+    @property
+    def normalized_score(self) -> float:
+        """Convert the legacy 0..10 score to the control-plane 0..1 scale."""
+        return min(1.0, max(0.0, self.score / 10.0))
+
 
 class StyleValidator:
     """Validate generated code style against repo conventions."""
 
-    def validate(
-        self, generated_code: str, conventions: RepoConventions
-    ) -> StyleValidationResult:
+    def validate(self, generated_code: str, conventions: RepoConventions) -> StyleValidationResult:
         """Validate generated code style.
 
         Args:
@@ -84,9 +87,7 @@ class StyleValidator:
             passed=passed, score=max(0.0, score), issues=issues, warnings=warnings
         )
 
-    def _check_naming(
-        self, code: str, conventions: RepoConventions
-    ) -> tuple[float, list[str]]:
+    def _check_naming(self, code: str, conventions: RepoConventions) -> tuple[float, list[str]]:
         """Check naming convention compliance."""
         issues = []
         score = 10.0
@@ -95,9 +96,7 @@ class StyleValidator:
             # Check for camelCase violations
             camel_case_matches = re.findall(r"\b[a-z]+[A-Z][a-zA-Z]+\b", code)
             if camel_case_matches:
-                issues.append(
-                    f"Uses camelCase but repo uses snake_case: {camel_case_matches[:3]}"
-                )
+                issues.append(f"Uses camelCase but repo uses snake_case: {camel_case_matches[:3]}")
                 score -= 3.0
 
         elif conventions.naming_convention == "camelCase":
@@ -106,9 +105,7 @@ class StyleValidator:
             # Filter out common patterns like __init__, __name__
             snake_case_matches = [m for m in snake_case_matches if not m.startswith("__")]
             if snake_case_matches:
-                issues.append(
-                    f"Uses snake_case but repo uses camelCase: {snake_case_matches[:3]}"
-                )
+                issues.append(f"Uses snake_case but repo uses camelCase: {snake_case_matches[:3]}")
                 score -= 3.0
 
         return max(0.0, score), issues
@@ -123,7 +120,7 @@ class StyleValidator:
         lines = code.split("\n")
         indent_violations = 0
 
-        for i, line in enumerate(lines, 1):
+        for _i, line in enumerate(lines, 1):
             if not line or not line[0].isspace():
                 continue
 
@@ -133,11 +130,10 @@ class StyleValidator:
             elif conventions.indentation == "2 spaces":
                 if line.startswith("    ") or line.startswith("\t"):
                     indent_violations += 1
-            elif conventions.indentation == "4 spaces":
-                if line.startswith("  ") and not line.startswith("    "):
-                    indent_violations += 1
-                elif line.startswith("\t"):
-                    indent_violations += 1
+            elif conventions.indentation == "4 spaces" and (
+                (line.startswith("  ") and not line.startswith("    ")) or line.startswith("\t")
+            ):
+                indent_violations += 1
 
         if indent_violations > 0:
             issues.append(
@@ -148,9 +144,7 @@ class StyleValidator:
 
         return max(0.0, score), issues
 
-    def _check_quotes(
-        self, code: str, conventions: RepoConventions
-    ) -> tuple[float, list[str]]:
+    def _check_quotes(self, code: str, conventions: RepoConventions) -> tuple[float, list[str]]:
         """Check quote style compliance."""
         warnings = []
         score = 10.0
@@ -219,9 +213,7 @@ class StyleValidator:
 
         return max(0.0, score), warnings
 
-    def _check_docstrings(
-        self, code: str, conventions: RepoConventions
-    ) -> tuple[float, list[str]]:
+    def _check_docstrings(self, code: str, conventions: RepoConventions) -> tuple[float, list[str]]:
         """Check docstring usage (Python)."""
         warnings = []
         score = 10.0
@@ -229,9 +221,7 @@ class StyleValidator:
         # Count functions with docstrings
         # Layer A fix: handles functions with optional return type annotation
         # (e.g. `def foo(x) -> int:"""..."""`).
-        docstring_re = re.compile(
-            r'def \w+\([^)]*\)(?:\s*->\s*[^:]+)?:\s*["\']{3}'
-        )
+        docstring_re = re.compile(r'def \w+\([^)]*\)(?:\s*->\s*[^:]+)?:\s*["\']{3}')
         functions_with_docs = len(docstring_re.findall(code))
         total_functions = len(re.findall(r"def \w+\(", code))
 

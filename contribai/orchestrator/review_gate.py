@@ -14,32 +14,12 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from contribai.publishing.permit import PublishSideEffect
+from contribai.review.models import ReviewDecision
+from contribai.review.service import ReviewService
+
 logger = logging.getLogger(__name__)
 console = Console()
-
-
-class ReviewDecision:
-    """Result of a human review decision."""
-
-    APPROVE = "approve"
-    REJECT = "reject"
-    SKIP = "skip"
-
-    def __init__(self, action: str, reason: str = ""):
-        self.action = action
-        self.reason = reason
-
-    @property
-    def approved(self) -> bool:
-        return self.action == self.APPROVE
-
-    @property
-    def rejected(self) -> bool:
-        return self.action == self.REJECT
-
-    @property
-    def skipped(self) -> bool:
-        return self.action == self.SKIP
 
 
 class HumanReviewer:
@@ -49,10 +29,25 @@ class HumanReviewer:
     in a Rich-formatted terminal UI, then prompts for approval.
     """
 
-    def __init__(self, *, auto_approve: bool = False):
+    def __init__(
+        self,
+        *,
+        auto_approve: bool = False,
+        review_service: ReviewService | None = None,
+    ):
         self._auto_approve = auto_approve
+        self._review_service = review_service
 
-    async def review(self, contribution, finding, repo_name: str) -> ReviewDecision:
+    async def review(
+        self,
+        contribution,
+        finding,
+        repo_name: str,
+        *,
+        planned_side_effects: tuple[PublishSideEffect, ...] = (),
+        work_id: str | None = None,
+        candidate_hash: str | None = None,
+    ) -> ReviewDecision:
         """Present a contribution for human review.
 
         Args:
@@ -63,13 +58,44 @@ class HumanReviewer:
         Returns:
             ReviewDecision with the user's choice.
         """
+        request = None
+        if self._review_service is not None and work_id and candidate_hash:
+            request = await self._review_service.request(
+                work_id,
+                candidate_hash,
+                required_side_effects=planned_side_effects,
+            )
+
         if self._auto_approve:
-            return ReviewDecision(ReviewDecision.APPROVE)
+            decision = ReviewDecision(
+                ReviewDecision.APPROVE,
+                candidate_hash=candidate_hash,
+                approved_side_effects=(
+                    frozenset(planned_side_effects) if request is not None else frozenset()
+                ),
+            )
+        else:
+            self._display_review(
+                contribution,
+                finding,
+                repo_name,
+                planned_side_effects=planned_side_effects,
+            )
+            decision = self._prompt_decision()
 
-        self._display_review(contribution, finding, repo_name)
-        return self._prompt_decision()
+        if request is None:
+            return decision
+        persisted = await self._review_service.decide(request.id, decision.bind(candidate_hash))
+        return persisted.decision or decision
 
-    def _display_review(self, contribution, finding, repo_name: str) -> None:
+    def _display_review(
+        self,
+        contribution,
+        finding,
+        repo_name: str,
+        *,
+        planned_side_effects: tuple[PublishSideEffect, ...] = (),
+    ) -> None:
         """Display the contribution details in Rich panels."""
         console.print()
         console.rule("[bold cyan]🔍 Human Review Required[/bold cyan]")
@@ -94,6 +120,16 @@ class HumanReviewer:
         info_table.add_row("File", finding.file_path or "N/A")
         info_table.add_row("Commit", contribution.commit_message)
         console.print(Panel(info_table, title="[bold]Contribution Details", border_style="blue"))
+
+        if planned_side_effects:
+            side_effects = "\n".join(f"- {effect.value}" for effect in planned_side_effects)
+            console.print(
+                Panel(
+                    side_effects,
+                    title="[bold yellow]Planned GitHub side effects",
+                    border_style="yellow",
+                )
+            )
 
         # Description
         console.print(
@@ -174,3 +210,63 @@ class HumanReviewer:
                 return ReviewDecision(ReviewDecision.SKIP)
 
             console.print("[dim]Please enter y, n, or s[/dim]")
+
+
+class ReviewGate:
+    """Central review boundary shared by code-scan and issue-solving paths."""
+
+    def __init__(
+        self,
+        reviewer: HumanReviewer,
+        *,
+        explicit_human_review: bool,
+        review_service: ReviewService | None = None,
+    ) -> None:
+        self._reviewer = reviewer
+        self._explicit_human_review = explicit_human_review
+        self._review_service = review_service
+        if review_service is not None and isinstance(reviewer, HumanReviewer):
+            reviewer._review_service = review_service
+
+    async def review(
+        self,
+        contribution,
+        finding,
+        repo_name: str,
+        *,
+        planned_side_effects: tuple[PublishSideEffect, ...] = (),
+        work_id: str | None = None,
+        candidate_hash: str | None = None,
+    ) -> ReviewDecision:
+        """Require explicit human approval before creating a new upstream issue."""
+        if (
+            PublishSideEffect.CREATE_ISSUE in planned_side_effects
+            and not self._explicit_human_review
+        ):
+            logger.warning(
+                "Skipping %s: planned issue creation requires explicit human review",
+                repo_name,
+            )
+            return ReviewDecision(
+                ReviewDecision.SKIP,
+                "planned issue creation requires explicit human review",
+            )
+
+        reviewer_kwargs = {"planned_side_effects": planned_side_effects}
+        if work_id is not None:
+            reviewer_kwargs["work_id"] = work_id
+        if candidate_hash is not None:
+            reviewer_kwargs["candidate_hash"] = candidate_hash
+        decision = await self._reviewer.review(contribution, finding, repo_name, **reviewer_kwargs)
+        if decision.approved is not True:
+            return ReviewDecision(
+                decision.action,
+                decision.reason,
+                candidate_hash=decision.candidate_hash,
+            )
+        return ReviewDecision(
+            ReviewDecision.APPROVE,
+            decision.reason,
+            candidate_hash=decision.candidate_hash,
+            approved_side_effects=frozenset(planned_side_effects),
+        )

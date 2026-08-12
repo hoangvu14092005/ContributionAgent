@@ -1,0 +1,1 @@
+"""Contribution Value benchmark fixtures."""

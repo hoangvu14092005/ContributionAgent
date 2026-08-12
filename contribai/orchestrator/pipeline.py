@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from contribai.agents.registry import create_default_registry
 from contribai.analysis.analyzer import CodeAnalyzer
-from contribai.analysis.context_compressor import ContextCompressor
 from contribai.analysis.repo_intel import RepoIntelligence, RepoProfile
 from contribai.core.config import ContribAIConfig
 from contribai.core.events import Event, EventBus, EventType, FileEventLogger
@@ -20,21 +20,27 @@ from contribai.core.middleware import build_default_chain
 from contribai.core.models import (
     AnalysisResult,
     DiscoveryCriteria,
+    Issue,
     PRResult,
     Repository,
 )
+from contribai.core.quotas import AsyncPRQuota
 from contribai.generator.engine import ContributionGenerator
 from contribai.github.client import GitHubClient
 from contribai.github.discovery import RepoDiscovery
-from contribai.github.guidelines import fetch_repo_guidelines
+from contribai.github.guidelines import fetch_repo_guidelines  # noqa: F401
 from contribai.issues.solver import IssueSolver
 from contribai.llm.provider import create_llm_provider
+from contribai.opportunity.engine import OpportunityEngine, OpportunitySource
 from contribai.orchestrator.memory import Memory
-from contribai.orchestrator.review_gate import HumanReviewer
+from contribai.orchestrator.pipeline_core import PipelineContext
+from contribai.orchestrator.review_gate import HumanReviewer, ReviewGate
 from contribai.pr.manager import PRManager
+from contribai.publishing.permit import PublishSideEffect
 from contribai.tools.protocol import create_default_tools
 
 logger = logging.getLogger(__name__)
+_DEFAULT_ISSUE_SOLVER = IssueSolver
 
 # Layer C: constants and `_titles_similar` moved to
 # :mod:`contribai.orchestrator.pipeline_constants`. They are re-imported
@@ -75,8 +81,11 @@ class ContribPipeline:
         self._agent_registry = None
         self._tool_registry = None
         self._reviewer: HumanReviewer | None = None
+        self._review_gate: ReviewGate | None = None
         self._event_bus: EventBus = EventBus()
         self._repo_intel: RepoIntelligence | None = None
+        self._opportunity_engine = OpportunityEngine()
+        self._controlled_publish: Callable[..., Awaitable[PRResult | None]] | None = None
 
     async def _init_components(self):
         """Initialize all pipeline components."""
@@ -169,6 +178,10 @@ class ContribPipeline:
         else:
             self._reviewer = HumanReviewer(auto_approve=True)
             logger.debug("Human review gate: disabled (auto-approve)")
+        self._review_gate = ReviewGate(
+            self._reviewer,
+            explicit_human_review=self.config.pipeline.human_review,
+        )
 
         # Event bus + file logger for observability
         from pathlib import Path
@@ -193,6 +206,10 @@ class ContribPipeline:
         self,
         criteria: DiscoveryCriteria | None = None,
         dry_run: bool = False,
+        publish_handler_factory: Callable[
+            [ContribPipeline], Callable[..., Awaitable[PRResult | None]]
+        ]
+        | None = None,
     ) -> PipelineResult:
         """Run the full pipeline: discover -> analyze -> generate -> PR.
 
@@ -203,6 +220,8 @@ class ContribPipeline:
             dry_run: If True, analyze and generate but don't create PRs
         """
         await self._init_components()
+        if publish_handler_factory is not None:
+            self._controlled_publish = publish_handler_factory(self)
         result = PipelineResult()
         run_id = await self._memory.start_run()
         await self._event_bus.emit(
@@ -229,6 +248,8 @@ class ContribPipeline:
 
             logger.info("Found %d candidate repositories", len(repos))
 
+            pr_quota = None if dry_run else AsyncPRQuota(remaining_prs)
+
             # Limit to max repos per run
             repos = repos[: self.config.github.max_repos_per_run]
 
@@ -252,7 +273,12 @@ class ContribPipeline:
                         )
                         return None
                     try:
-                        return await self._process_repo(repo, dry_run, remaining_prs)
+                        return await self._process_repo(
+                            repo,
+                            dry_run,
+                            remaining_prs,
+                            pr_quota=pr_quota,
+                        )
                     except Exception as e:
                         msg = f"Error processing {repo.full_name}: {e}"
                         logger.error(msg)
@@ -283,6 +309,7 @@ class ContribPipeline:
             )
 
         finally:
+            self._controlled_publish = None
             await self._event_bus.emit(
                 Event(
                     type=EventType.PIPELINE_COMPLETE,
@@ -629,6 +656,54 @@ class ContribPipeline:
 
         return result
 
+    async def run_controlled(
+        self,
+        repo_url: str,
+        *,
+        publish_handler_factory: Callable[
+            [ContribPipeline], Callable[..., Awaitable[PRResult | None]]
+        ],
+        issue_number: int | None = None,
+        max_prs: int = 1,
+    ) -> PipelineResult:
+        """Run one repository through the permit-bearing live publish path.
+
+        The factory is invoked only after all pipeline collaborators are
+        initialized, allowing a handler to share the read-only GitHub client
+        and durable Memory connection while retaining the publisher as the
+        sole GitHub write authority.
+        """
+        if max_prs <= 0:
+            raise ValueError("max_prs must be positive")
+        parts = repo_url.rstrip("/").split("/")
+        if len(parts) < 2:
+            raise ValueError("repo_url must identify owner/name")
+        owner, name = parts[-2], parts[-1]
+
+        await self._init_components()
+        self._controlled_publish = publish_handler_factory(self)
+        try:
+            repo = await self._github.get_repo_details(owner, name)
+            if issue_number is None:
+                repo_result = await self._process_repo(
+                    repo,
+                    dry_run=False,
+                    max_prs=max_prs,
+                    pr_quota=AsyncPRQuota(max_prs),
+                )
+            else:
+                repo_result = await self._process_repo_issues(
+                    repo,
+                    dry_run=False,
+                    max_prs=max_prs,
+                    issue_number=issue_number,
+                    pr_quota=AsyncPRQuota(max_prs),
+                )
+            return repo_result
+        finally:
+            self._controlled_publish = None
+            await self._cleanup()
+
     async def analyze_only(self, repo_url: str) -> AnalysisResult | None:
         """Analyze a repo without generating contributions or PRs."""
         parts = repo_url.rstrip("/").split("/")
@@ -643,7 +718,12 @@ class ContribPipeline:
 
     # ── Internal ───────────────────────────────────────────────────────────
 
-    def _build_pipeline_context(self) -> "PipelineContext":
+    def _build_pipeline_context(
+        self,
+        *,
+        solver: IssueSolver | None = None,
+        pr_quota: AsyncPRQuota | None = None,
+    ) -> PipelineContext:
         """Freeze the live collaborators into a :class:`PipelineContext`.
 
         The :class:`Pipeline` conductor treats ``ctx`` as immutable and
@@ -662,6 +742,84 @@ class ContribPipeline:
             repo_intel=self._repo_intel,
             event_bus=self._event_bus,
             config=self.config,
+            review_and_publish=(
+                self._controlled_publish
+                or (self._review_and_publish if self._review_gate is not None else None)
+            ),
+            check_ci=self._check_ci_and_close_if_failed,
+            solver=solver,
+            pr_quota=pr_quota,
+            controlled_publish=self._controlled_publish is not None,
+        )
+
+    async def _review_and_publish(
+        self,
+        contribution,
+        finding,
+        repo: Repository,
+        guidelines,
+        *,
+        closes_issue: int | None = None,
+    ) -> PRResult | None:
+        """Apply the single human-review boundary before legacy publishing."""
+        planned_side_effects = [PublishSideEffect.CREATE_PR]
+        if closes_issue is None and guidelines.requires_issue_link:
+            planned_side_effects.insert(0, PublishSideEffect.CREATE_ISSUE)
+
+        decision = await self._review_gate.review(
+            contribution,
+            finding,
+            repo.full_name,
+            planned_side_effects=tuple(planned_side_effects),
+        )
+        if decision.approved is not True:
+            logger.info(
+                "Review did not approve %s (decision=%s)",
+                contribution.title,
+                decision.action,
+            )
+            return None
+
+        return await self._pr_manager.create_pr(
+            contribution,
+            repo,
+            guidelines=guidelines,
+            closes_issue=closes_issue,
+        )
+
+    async def _close_linked_issues(
+        self,
+        repo: Repository,
+        pr_number: int,
+        *,
+        reason: str = "PR was closed",
+    ) -> None:
+        """Deny issue closing when no permit-bearing publisher command exists."""
+        logger.warning(
+            "No linked issue was closed for %s PR #%d (%s): a publisher permit is required",
+            repo.full_name,
+            pr_number,
+            reason,
+        )
+
+    async def _check_ci_and_close_if_failed(
+        self,
+        pr_result: PRResult,
+        repo: Repository,
+        *,
+        max_wait_sec: int = 90,
+        poll_interval: int = 15,
+    ) -> None:
+        """Delegate CI monitoring while retaining the instance compatibility seam."""
+        from contribai.orchestrator.steps import _check_ci_and_close_if_failed
+
+        await _check_ci_and_close_if_failed(
+            self._github,
+            self._memory,
+            repo,
+            pr_result,
+            max_wait_sec=max_wait_sec,
+            poll_interval=poll_interval,
         )
 
     async def _process_repo(
@@ -669,6 +827,8 @@ class ContribPipeline:
         repo: Repository,
         dry_run: bool,
         max_prs: int = 5,
+        *,
+        pr_quota: AsyncPRQuota | None = None,
     ) -> PipelineResult:
         """Process a single repository through the analysis pipeline (Layer C).
 
@@ -688,7 +848,7 @@ class ContribPipeline:
         logger.info("📦 Processing: %s", repo.full_name)
 
         state = PipelineState(repo=repo, dry_run=dry_run, max_prs=max_prs)
-        ctx = self._build_pipeline_context()
+        ctx = self._build_pipeline_context(pr_quota=pr_quota)
 
         analysis_pipeline = Pipeline(
             [
@@ -707,6 +867,9 @@ class ContribPipeline:
         repo: Repository,
         dry_run: bool,
         max_prs: int = 3,
+        *,
+        issue_number: int | None = None,
+        pr_quota: AsyncPRQuota | None = None,
     ) -> PipelineResult:
         """Process a repo by solving its open Issues (Layer C).
 
@@ -726,8 +889,19 @@ class ContribPipeline:
 
         logger.info("📋 Looking for solvable issues in %s...", repo.full_name)
 
-        state = PipelineState(repo=repo, dry_run=dry_run, max_prs=max_prs)
-        ctx = self._build_pipeline_context()
+        state = PipelineState(
+            repo=repo,
+            dry_run=dry_run,
+            max_prs=max_prs,
+            issue_number=issue_number,
+        )
+        solver_factory = IssueSolver
+        if solver_factory is _DEFAULT_ISSUE_SOLVER:
+            from contribai.issues import solver as solver_module
+
+            solver_factory = solver_module.IssueSolver
+        solver = solver_factory(llm=self._llm, github=self._github)
+        ctx = self._build_pipeline_context(solver=solver, pr_quota=pr_quota)
 
         issue_pipeline = Pipeline(
             [
@@ -740,6 +914,63 @@ class ContribPipeline:
             label="issue",
         )
         return (await issue_pipeline.run(state, ctx)).result
+
+    async def _rank_issue_opportunities(
+        self, repo: Repository, issues: list[Issue], max_candidates: int
+    ) -> list[Issue]:
+        """Rank issue candidates and persist their read-only score evidence."""
+        profile: RepoProfile | None = None
+        if self._repo_intel is not None:
+            try:
+                profile = await self._repo_intel.profile(repo.owner, repo.name)
+            except Exception as exc:
+                logger.debug(
+                    "Opportunity repo profile failed for %s: %s",
+                    repo.full_name,
+                    exc,
+                )
+
+        outcomes = []
+        get_outcomes = getattr(self._memory, "get_contribution_outcomes", None)
+        if get_outcomes is not None:
+            try:
+                loaded_outcomes = await get_outcomes(repo.full_name)
+                if isinstance(loaded_outcomes, list):
+                    outcomes = loaded_outcomes
+            except Exception as exc:
+                logger.debug(
+                    "Opportunity outcome learning unavailable for %s: %s",
+                    repo.full_name,
+                    exc,
+                )
+
+        candidates = self._opportunity_engine.rank(
+            repo,
+            issues=issues,
+            profile=profile,
+            max_candidates=max_candidates,
+            outcomes=outcomes,
+        )
+        issue_candidates = [
+            candidate for candidate in candidates if candidate.source is OpportunitySource.ISSUE
+        ]
+
+        record_score = getattr(self._memory, "record_opportunity_score", None)
+        if record_score is not None:
+            for candidate in issue_candidates:
+                try:
+                    await record_score(candidate)
+                except Exception as exc:
+                    logger.debug(
+                        "Could not persist opportunity score for %s #%s: %s",
+                        repo.full_name,
+                        candidate.issue_number,
+                        exc,
+                    )
+
+        return [
+            candidate.task for candidate in issue_candidates if isinstance(candidate.task, Issue)
+        ]
 
     def _identify_key_files(self, file_tree: list, repo: Repository) -> list[str]:
         """Back-compat shim — calls :func:`contribai.orchestrator.steps.identify_key_files`.

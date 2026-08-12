@@ -12,6 +12,7 @@ import logging
 import re
 from enum import StrEnum
 
+from contribai.context.context import ContributionContext
 from contribai.core.models import (
     ContributionType,
     Finding,
@@ -21,6 +22,7 @@ from contribai.core.models import (
     Severity,
 )
 from contribai.core.text_utils import strip_think_blocks
+from contribai.localization import ContributionTask, LocalizationSet, Localizer
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,23 @@ class IssueSolver:
     def __init__(self, llm, github):
         self._llm = llm
         self._github = github
+        self._localizer = Localizer()
+
+    async def localize_issue(
+        self,
+        issue: Issue,
+        context: ContributionContext,
+    ) -> LocalizationSet:
+        """Return ranked issue locations for the repair engine."""
+        return await self._localizer.locate(ContributionTask.from_issue(issue), context)
+
+    async def localize_finding(
+        self,
+        finding: Finding,
+        context: ContributionContext,
+    ) -> LocalizationSet:
+        """Return ranked locations for a finding produced by issue analysis."""
+        return await self._localizer.locate(ContributionTask.from_finding(finding), context)
 
     # ── Issue Discovery ────────────────────────────────────────────────────
 
@@ -342,7 +361,7 @@ class IssueSolver:
         self,
         issue: Issue,
         repo: Repository,
-        context: RepoContext,
+        context: RepoContext | ContributionContext,
     ) -> Finding | None:
         """Convert a GitHub issue into a Finding for the generator.
 
@@ -357,6 +376,15 @@ class IssueSolver:
         Returns:
             Finding object that can be fed to the ContributionGenerator.
         """
+        contribution_context = context if isinstance(context, ContributionContext) else None
+        localization_prompt = ""
+        if contribution_context:
+            localization_prompt = await self._localization_prompt(
+                ContributionTask.from_issue(issue), contribution_context
+            )
+            context = contribution_context.to_repo_context()
+        if isinstance(context, ContributionContext):
+            context = context.to_repo_context()
         category = self.classify_issue(issue)
         contrib_type = CATEGORY_TO_CONTRIB.get(category, ContributionType.CODE_QUALITY)
 
@@ -384,6 +412,8 @@ class IssueSolver:
 
 {relevant_code}
 
+{localization_prompt}
+
 Respond in this exact format:
 FILE_PATH: <main file to change>
 SEVERITY: <low|medium|high|critical>
@@ -394,9 +424,9 @@ SUGGESTION: <specific implementation suggestion>
 
         try:
             # Set task type for custom provider
-            if hasattr(self._llm, 'set_task'):
-                self._llm.set_task('issue_solver')
-            
+            if hasattr(self._llm, "set_task"):
+                self._llm.set_task("issue_solver")
+
             response = await self._llm.complete(
                 prompt,
                 system="You are a senior developer analyzing GitHub issues. "
@@ -439,7 +469,7 @@ SUGGESTION: <specific implementation suggestion>
         self,
         issue: Issue,
         repo: Repository,
-        context: RepoContext,
+        context: RepoContext | ContributionContext,
     ) -> list[Finding]:
         """Deep multi-file issue solving with codebase understanding.
 
@@ -461,6 +491,15 @@ SUGGESTION: <specific implementation suggestion>
         Returns:
             List of Finding objects for multi-file changes.
         """
+        contribution_context = context if isinstance(context, ContributionContext) else None
+        localization_prompt = ""
+        if contribution_context:
+            localization_prompt = await self._localization_prompt(
+                ContributionTask.from_issue(issue), contribution_context
+            )
+            context = contribution_context.to_repo_context()
+        if isinstance(context, ContributionContext):
+            context = context.to_repo_context()
         category = self.classify_issue(issue)
         contrib_type = CATEGORY_TO_CONTRIB.get(category, ContributionType.CODE_QUALITY)
 
@@ -490,6 +529,9 @@ a detailed plan for which file(s) to create or modify.
 ## Relevant Code:
 {relevant_code}
 
+## Preliminary localization candidates
+{localization_prompt}
+
 ## Instructions:
 1. Identify ALL files that need to be created or modified
 2. For each file, explain what changes are needed
@@ -509,9 +551,9 @@ SUGGESTION: <specific implementation details>
 
         try:
             # Set task type for custom provider
-            if hasattr(self._llm, 'set_task'):
-                self._llm.set_task('issue_solver')
-            
+            if hasattr(self._llm, "set_task"):
+                self._llm.set_task("issue_solver")
+
             response = await self._llm.complete(
                 prompt,
                 system=(
@@ -544,6 +586,21 @@ SUGGESTION: <specific implementation details>
             # Fall back to single-file solve
             single = await self.solve_issue(issue, repo, context)
             return [single] if single else []
+
+    async def _localization_prompt(
+        self,
+        task: ContributionTask,
+        context: ContributionContext,
+    ) -> str:
+        """Build an evidence-bearing prompt section for repair planning."""
+        try:
+            localized = await self._localizer.locate(task, context)
+            return (
+                localized.to_prompt(max_candidates=8) or "No deterministic localization candidate."
+            )
+        except Exception as exc:
+            logger.debug("Deterministic issue localization failed: %s", exc)
+            return "No deterministic localization candidate."
 
     async def _build_issue_context(self, issue: Issue, repo: Repository) -> str:
         """Build full issue context including comments."""

@@ -1,6 +1,6 @@
 # ContribAI — Project Overview & PDR
 
-**Version:** 3.0.2 | **License:** AGPL-3.0 + Commons Clause | **Status:** Active Development
+**Version:** 4.1.0 | **License:** MIT | **Status:** Active Development
 
 ---
 
@@ -269,7 +269,7 @@ Autonomous, safe, high-quality code contributions that:
 1. **GitHub API Rate Limits** — 5,000 requests/hour (authenticated)
 2. **LLM API Costs** — Pay-as-you-go; configurable daily budget
 3. **Code Size** — Skips files > 50 KB
-4. **License** — AGPL-3.0 + Commons Clause (open source, non-commercial)
+4. **License** — MIT (permissive open source)
 5. **Python Version** — 3.11+ only (type hints, async patterns)
 
 ### Assumptions

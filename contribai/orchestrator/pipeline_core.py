@@ -23,8 +23,9 @@ state) -> None``, append to a list, and pass to :class:`Pipeline`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING
 
 from contribai.orchestrator.pipeline_constants import SkipReason
 
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
         RepoContext,
         Repository,
     )
+    from contribai.core.quotas import AsyncPRQuota
     from contribai.generator.engine import ContributionGenerator
     from contribai.github.client import GitHubClient
     from contribai.github.guidelines import RepoGuidelines
@@ -81,32 +83,32 @@ class PipelineState:
     repo: Repository
     dry_run: bool = False
     max_prs: int = 5
-    # Set by ``solve_issue_step`` for issue-mode runs. Parallel to
-    # ``state.contributions`` — ``closes_issues[i]`` corresponds to
-    # ``state.contributions[i]``. ``None`` entries mean "not linked to an
-    # issue" (i.e. analysis-mode runs).
-    closes_issues: list[Optional[int]] = field(default_factory=list)
+    issue_number: int | None = None
+    # Set by ``solve_issue_step`` for issue-mode runs. Entries are aligned with
+    # ``state.validated_findings`` until generation creates an envelope.
+    closes_issues: list[int | None] = field(default_factory=list)
 
     # ── Step 1 outputs (load_repo_context_step) ───────────────────────
-    cached_context: Optional[str] = None
-    guidelines: Optional[RepoGuidelines] = None
-    repo_profile: Optional[RepoProfile] = None
+    cached_context: str | None = None
+    guidelines: RepoGuidelines | None = None
+    repo_profile: RepoProfile | None = None
     pr_history_context: str = ""
     extra_context: str = ""
-    skip_reason: Optional[SkipReason] = None
+    skip_reason: SkipReason | None = None
 
     # ── Step 2 outputs (run_analysis_step / solve_issue_step) ─────────
-    analysis: Optional[AnalysisResult] = None
+    analysis: AnalysisResult | None = None
     findings: list[Finding] = field(default_factory=list)
 
     # ── Step 3 outputs (validate_findings_step / validate_issue_step) ─
     file_tree: list[FileNode] = field(default_factory=list)
     relevant_files: dict[str, str] = field(default_factory=dict)
-    context: Optional[RepoContext] = None
+    context: RepoContext | None = None
     validated_findings: list[Finding] = field(default_factory=list)
 
     # ── Step 4 outputs (generate_contribution_step) ───────────────────
     contributions: list[Contribution] = field(default_factory=list)
+    contribution_envelopes: list[ContributionEnvelope] = field(default_factory=list)
 
     # ── Step 5 outputs (submit_pr_step) ───────────────────────────────
     prs: list[PRResult] = field(default_factory=list)
@@ -144,7 +146,11 @@ class PipelineContext:
     repo_intel: RepoIntelligence
     event_bus: EventBus
     config: ContribAIConfig
-    solver: Optional[IssueSolver] = None  # populated by `_build_pipeline_context` in issue mode
+    solver: IssueSolver | None = None  # populated by `_build_pipeline_context` in issue mode
+    review_and_publish: Callable[..., Awaitable[PRResult | None]] | None = None
+    check_ci: Callable[..., Awaitable[None]] | None = None
+    pr_quota: AsyncPRQuota | None = None
+    controlled_publish: bool = False
 
     def set_task(self, task_name: str) -> None:
         """Set task context on the LLM (no-op for providers without it).
@@ -162,6 +168,14 @@ class PipelineContext:
 
             with contextlib.suppress(ValueError):
                 self.llm.set_task(TaskType(task_name))
+
+
+@dataclass(frozen=True, slots=True)
+class ContributionEnvelope:
+    """Keep generated contribution data bound to its originating issue."""
+
+    contribution: Contribution
+    closes_issue: int | None = None
 
 
 # ── Conductor ─────────────────────────────────────────────────────────────────
@@ -226,6 +240,7 @@ class Pipeline:
 
 
 __all__ = [
+    "ContributionEnvelope",
     "Pipeline",
     "PipelineContext",
     "PipelineState",

@@ -17,6 +17,8 @@ import mcp.types as types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+from contribai.control.command_service import CommandService
+from contribai.control.mode import ExecutionMode
 from contribai.core.config import load_config
 from contribai.core.exceptions import GitHubAPIError
 from contribai.github.client import GitHubClient
@@ -47,12 +49,27 @@ async def get_memory() -> Memory:
     return _memory
 
 
+async def get_commands() -> CommandService:
+    """Return the shared command boundary backed by MCP's local database."""
+    return CommandService(await get_memory())
+
+
 def _ok(**kwargs: Any) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=json.dumps(kwargs, default=str))]
 
 
 def _err(msg: str) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=json.dumps({"error": msg}))]
+
+
+def _blocked(msg: str, **kwargs: Any) -> list[types.TextContent]:
+    """Return an explicit blocked command outcome rather than success-shaped data."""
+    return [
+        types.TextContent(
+            type="text",
+            text=json.dumps({"status": "blocked", "error": msg, **kwargs}, default=str),
+        )
+    ]
 
 
 # ── Tool listing ───────────────────────────────────────────────────────────────
@@ -238,6 +255,29 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
+            name="submit_work",
+            description="Queue a contribution WorkItem through the control plane",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string"},
+                    "issue_number": {"type": "integer"},
+                    "mode": {"type": "string", "enum": ["shadow", "review_only", "live"]},
+                    "idempotency_key": {"type": "string"},
+                },
+                "required": ["repo"],
+            },
+        ),
+        types.Tool(
+            name="get_work_item",
+            description="Read a persisted contribution WorkItem",
+            inputSchema={
+                "type": "object",
+                "properties": {"work_id": {"type": "string"}},
+                "required": ["work_id"],
+            },
+        ),
+        types.Tool(
             name="patrol_prs",
             description=(
                 "Collect raw review comments from open PRs for Claude to classify and act on"
@@ -294,6 +334,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return await _check_ai_policy(arguments)
         elif name == "get_stats":
             return await _get_stats(arguments)
+        elif name == "submit_work":
+            return await _submit_work(arguments)
+        elif name == "get_work_item":
+            return await _get_work_item(arguments)
         elif name == "patrol_prs":
             return await _patrol_prs(arguments)
         elif name == "cleanup_forks":
@@ -370,71 +414,72 @@ async def _get_open_issues(args: dict) -> list[types.TextContent]:
     )
 
 
+async def _submit_work(args: dict) -> list[types.TextContent]:
+    """Submit a command and execute LIVE work through the control-plane worker."""
+    commands = await get_commands()
+    mode = ExecutionMode(args.get("mode", ExecutionMode.SHADOW))
+    item = await commands.submit(
+        args["repo"],
+        issue_number=args.get("issue_number"),
+        mode=mode,
+        idempotency_key=args.get("idempotency_key"),
+        metadata={"source": "mcp.submit_work"},
+    )
+    if mode is ExecutionMode.LIVE:
+        from contribai.control.pipeline_executor import PipelineWorkItemExecutor
+        from contribai.control.supervisor import ExecutionSupervisor
+
+        item = await ExecutionSupervisor(
+            await get_memory(),
+            executor=PipelineWorkItemExecutor(_config),
+            commands=commands,
+        ).run_once(item.id)
+        return _ok(
+            status="processed",
+            work_id=item.id,
+            repo=item.repo,
+            mode=item.mode,
+            state=item.state,
+        )
+    return _ok(status="queued", work_id=item.id, repo=item.repo, mode=item.mode)
+
+
+async def _get_work_item(args: dict) -> list[types.TextContent]:
+    """Read one WorkItem snapshot through the same command service."""
+    item = await (await get_commands()).get(args["work_id"])
+    return _ok(
+        work_id=item.id,
+        repo=item.repo,
+        issue_number=item.issue_number,
+        mode=item.mode,
+        state=item.state,
+        attempt=item.attempt,
+        version=item.version,
+    )
+
+
 async def _fork_repo(args: dict) -> list[types.TextContent]:
-    gh = await get_github()
-    fork = await gh.fork_repository(args["owner"], args["repo"])
-    return _ok(fork_full_name=fork.full_name)
+    return _err("Direct MCP fork writes are disabled; submit a publish command with a valid permit")
 
 
 async def _create_branch(args: dict) -> list[types.TextContent]:
-    gh = await get_github()
-    ref = await gh.create_branch(
-        args["fork_owner"],
-        args["repo"],
-        args["branch_name"],
-        from_branch=args.get("from_branch"),
+    return _err(
+        "Direct MCP branch writes are disabled; submit a publish command with a valid permit"
     )
-    return _ok(ref=ref.get("ref", ""))
 
 
 async def _push_file_change(args: dict) -> list[types.TextContent]:
-    gh = await get_github()
-    result = await gh.create_or_update_file(
-        owner=args["fork_owner"],
-        repo=args["repo"],
-        path=args["path"],
-        content=args["content"],
-        message=args["commit_msg"],
-        branch=args["branch"],
-        sha=args.get("sha"),
-    )
-    return _ok(
-        commit_sha=result.get("commit", {}).get("sha", ""),
-        content_url=result.get("content", {}).get("html_url", ""),
-    )
+    return _err("Direct MCP file writes are disabled; submit a publish command with a valid permit")
 
 
 async def _create_pr(args: dict) -> list[types.TextContent]:
-    gh = await get_github()
-    mem = await get_memory()
-    pr_data = await gh.create_pull_request(
-        owner=args["owner"],
-        repo=args["repo"],
-        title=args["title"],
-        body=args["body"],
-        head=args["head_branch"],
-        base=args.get("base_branch"),
-    )
-    pr_number = pr_data["number"]
-    pr_url = pr_data["html_url"]
-    # Record to memory so status/duplicate checks work
-    await mem.record_pr(
-        repo=f"{args['owner']}/{args['repo']}",
-        pr_number=pr_number,
-        pr_url=pr_url,
-        title=args["title"],
-        pr_type="mcp",
-    )
-    return _ok(pr_number=pr_number, pr_url=pr_url)
+    return _err("Direct MCP PR writes are disabled; submit a publish command with a valid permit")
 
 
 async def _close_pr(args: dict) -> list[types.TextContent]:
-    gh = await get_github()
-    try:
-        await gh.close_pull_request(args["owner"], args["repo"], args["pr_number"])
-        return _ok(success=True)
-    except Exception as e:
-        return _ok(success=False, reason=str(e))
+    return _err(
+        "Direct MCP close writes are disabled; submit a publish command with a valid permit"
+    )
 
 
 # AI policy keywords (inlined from pipeline._check_ai_policy)
@@ -569,21 +614,22 @@ async def _cleanup_forks(args: dict) -> list[types.TextContent]:
         else:
             forks_kept.append(fork_name)
 
-    if not dry_run:
-        for fork_name in forks_to_delete:
-            try:
-                owner, repo_name = fork_name.split("/", 1)
-                # Safety: verify this is actually a fork before deleting
-                repo_info = await gh._get(f"/repos/{owner}/{repo_name}")
-                if not repo_info.get("fork", False):
-                    logger.warning("Skipping %s — not a fork, refusing to delete", fork_name)
-                    continue
-                await gh.delete_repository(owner, repo_name)
-                logger.info("Deleted fork %s", fork_name)
-            except Exception as e:
-                logger.warning("Failed to delete %s: %s", fork_name, e)
+    write_blocked = not dry_run and bool(forks_to_delete)
+    if write_blocked:
+        message = "Fork deletion requires a permit-bearing publisher command; no forks deleted"
+        logger.warning(message)
+        return _blocked(
+            message,
+            forks_to_delete=forks_to_delete,
+            forks_kept=forks_kept,
+            dry_run=dry_run,
+        )
 
-    return _ok(forks_to_delete=forks_to_delete, forks_kept=forks_kept, dry_run=dry_run)
+    return _ok(
+        forks_to_delete=forks_to_delete,
+        forks_kept=forks_kept,
+        dry_run=dry_run,
+    )
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

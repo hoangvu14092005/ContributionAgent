@@ -6,11 +6,24 @@ to avoid duplicate work and improve over time.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
+
+from contribai.storage.outcomes import (
+    OUTCOME_SCHEMA,
+    ContributionOutcome,
+    OutcomeStore,
+)
+from contribai.storage.work_items import (
+    WorkItemRepository,
+    connection_transaction_lock,
+    migrate_work_item_schema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +107,20 @@ CREATE TABLE IF NOT EXISTS working_memory (
     expires_at  TEXT,
     UNIQUE(repo, key)
 );
+
+CREATE TABLE IF NOT EXISTS opportunity_scores (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo            TEXT NOT NULL,
+    issue_number    INTEGER,
+    source          TEXT NOT NULL,
+    expected_value  REAL NOT NULL,
+    score_json      TEXT NOT NULL,
+    evidence_json   TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_opportunity_scores_repo
+ON opportunity_scores(repo, created_at);
 """
 
 
@@ -103,18 +130,72 @@ class Memory:
     def __init__(self, db_path: str | Path):
         self._db_path = Path(db_path).expanduser()
         self._db: aiosqlite.Connection | None = None
+        self._work_items: WorkItemRepository | None = None
+        self._outcomes: OutcomeStore | None = None
+        self._transaction_lock = asyncio.Lock()
 
     async def init(self):
         """Initialize database connection and schema."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._db_path))
-        await self._db.executescript(SCHEMA)
-        await self._db.commit()
+        self._transaction_lock = connection_transaction_lock(self._db)
+        async with self._transaction_lock:
+            await self._db.execute("PRAGMA foreign_keys = ON")
+            await self._db.executescript(SCHEMA)
+            await self._db.executescript(OUTCOME_SCHEMA)
+            await self._db.commit()
+        await migrate_work_item_schema(self._db)
+        self._work_items = WorkItemRepository(self._db, self._transaction_lock)
+        self._outcomes = OutcomeStore(self._db, self._transaction_lock)
         logger.info("Memory initialized at %s", self._db_path)
 
     async def close(self):
         if self._db:
             await self._db.close()
+            self._db = None
+            self._work_items = None
+            self._outcomes = None
+
+    @property
+    def connection(self) -> aiosqlite.Connection:
+        """Return the initialized connection shared by all persistence repositories."""
+        if self._db is None:
+            raise RuntimeError("Memory is not initialized")
+        return self._db
+
+    @property
+    def work_items(self) -> WorkItemRepository:
+        """Return the WorkItem repository bound to this Memory connection."""
+        if self._work_items is None:
+            raise RuntimeError("Memory is not initialized")
+        return self._work_items
+
+    @property
+    def outcomes(self) -> OutcomeStore:
+        """Return the structured contribution outcome repository."""
+        if self._outcomes is None:
+            raise RuntimeError("Memory is not initialized")
+        return self._outcomes
+
+    async def record_contribution_outcome(self, outcome: ContributionOutcome) -> int:
+        """Persist one structured outcome for learning and benchmark reporting."""
+        return await self.outcomes.record(outcome)
+
+    async def get_contribution_outcomes(
+        self,
+        repo: str | None = None,
+        *,
+        limit: int = 200,
+    ) -> list[ContributionOutcome]:
+        """Read structured outcome evidence for a repo or across repos."""
+        return await self.outcomes.list(repo, limit=limit)
+
+    async def applied_schema_versions(self) -> tuple[int, ...]:
+        """Return applied control-plane schema versions for diagnostics."""
+        cursor = await self.connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        )
+        return tuple(int(row[0]) for row in await cursor.fetchall())
 
     # ── Repos ──────────────────────────────────────────────────────────────
 
@@ -127,13 +208,14 @@ class Memory:
 
     async def record_analysis(self, full_name: str, language: str, stars: int, findings_count: int):
         """Record that a repo was analyzed."""
-        await self._db.execute(
-            """INSERT OR REPLACE INTO analyzed_repos
-               (full_name, language, stars, analyzed_at, findings)
-               VALUES (?, ?, ?, ?, ?)""",
-            (full_name, language, stars, datetime.now(UTC).isoformat(), findings_count),
-        )
-        await self._db.commit()
+        async with self._transaction_lock:
+            await self._db.execute(
+                """INSERT OR REPLACE INTO analyzed_repos
+                   (full_name, language, stars, analyzed_at, findings)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (full_name, language, stars, datetime.now(UTC).isoformat(), findings_count),
+            )
+            await self._db.commit()
 
     async def get_analyzed_repos(self, limit: int = 50) -> list[dict]:
         """Get recently analyzed repos."""
@@ -143,6 +225,56 @@ class Memory:
         rows = await cursor.fetchall()
         cols = [d[0] for d in cursor.description]
         return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def record_opportunity_score(self, candidate) -> int:
+        """Persist score and evidence so ranking decisions remain explainable."""
+        score = candidate.score
+        evidence = [
+            {"feature": item.feature, "value": item.value, "rationale": item.rationale}
+            for item in score.evidence
+        ]
+        score_payload = {
+            "probability_correct_patch": score.probability_correct_patch,
+            "probability_maintainer_wants": score.probability_maintainer_wants,
+            "probability_merge": score.probability_merge,
+            "impact": score.impact,
+            "cost": score.cost,
+            "risk_penalty": score.risk_penalty,
+            "spam_penalty": score.spam_penalty,
+            "expected_value": score.expected_value,
+        }
+        async with self._transaction_lock:
+            cursor = await self._db.execute(
+                """INSERT INTO opportunity_scores
+                   (repo, issue_number, source, expected_value, score_json,
+                    evidence_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    candidate.repo,
+                    candidate.issue_number,
+                    candidate.source.value,
+                    score.expected_value,
+                    json.dumps(score_payload, sort_keys=True),
+                    json.dumps(evidence, sort_keys=True),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            await self._db.commit()
+            return int(cursor.lastrowid)
+
+    async def get_opportunity_scores(self, repo: str, limit: int = 50) -> list[dict]:
+        """Read persisted opportunity scores and their evidence."""
+        cursor = await self._db.execute(
+            "SELECT * FROM opportunity_scores WHERE repo = ? ORDER BY created_at DESC LIMIT ?",
+            (repo, limit),
+        )
+        rows = await cursor.fetchall()
+        cols = [description[0] for description in cursor.description]
+        values = [dict(zip(cols, row, strict=False)) for row in rows]
+        for value in values:
+            value["score"] = json.loads(value.pop("score_json"))
+            value["evidence"] = json.loads(value.pop("evidence_json"))
+        return values
 
     # ── PRs ────────────────────────────────────────────────────────────────
 
@@ -158,21 +290,26 @@ class Memory:
     ):
         """Record a submitted PR."""
         now = datetime.now(UTC).isoformat()
-        await self._db.execute(
-            """INSERT OR REPLACE INTO submitted_prs
-               (repo, pr_number, pr_url, title, type, branch, fork, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (repo, pr_number, pr_url, title, pr_type, branch, fork, now, now),
-        )
-        await self._db.commit()
+        async with self._transaction_lock:
+            await self._db.execute(
+                """INSERT OR REPLACE INTO submitted_prs
+                   (repo, pr_number, pr_url, title, type, branch, fork, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (repo, pr_number, pr_url, title, pr_type, branch, fork, now, now),
+            )
+            await self._db.commit()
 
     async def update_pr_status(self, repo: str, pr_number: int, status: str):
         """Update PR status."""
-        await self._db.execute(
-            "UPDATE submitted_prs SET status = ?, updated_at = ? WHERE repo = ? AND pr_number = ?",
-            (status, datetime.now(UTC).isoformat(), repo, pr_number),
-        )
-        await self._db.commit()
+        async with self._transaction_lock:
+            await self._db.execute(
+                """
+                UPDATE submitted_prs SET status = ?, updated_at = ?
+                WHERE repo = ? AND pr_number = ?
+                """,
+                (status, datetime.now(UTC).isoformat(), repo, pr_number),
+            )
+            await self._db.commit()
 
     async def get_prs(self, status: str | None = None, limit: int = 50) -> list[dict]:
         """Get submitted PRs, optionally filtered by status."""
@@ -213,12 +350,13 @@ class Memory:
 
     async def start_run(self) -> int:
         """Record the start of a pipeline run. Returns run ID."""
-        cursor = await self._db.execute(
-            "INSERT INTO run_log (started_at) VALUES (?)",
-            (datetime.now(UTC).isoformat(),),
-        )
-        await self._db.commit()
-        return cursor.lastrowid
+        async with self._transaction_lock:
+            cursor = await self._db.execute(
+                "INSERT INTO run_log (started_at) VALUES (?)",
+                (datetime.now(UTC).isoformat(),),
+            )
+            await self._db.commit()
+            return cursor.lastrowid
 
     async def finish_run(
         self,
@@ -229,14 +367,22 @@ class Memory:
         errors: int,
     ):
         """Record the completion of a pipeline run."""
-        await self._db.execute(
-            """UPDATE run_log
-               SET finished_at = ?, repos_analyzed = ?, prs_created = ?,
-                   findings = ?, errors = ?
-               WHERE id = ?""",
-            (datetime.now(UTC).isoformat(), repos_analyzed, prs_created, findings, errors, run_id),
-        )
-        await self._db.commit()
+        async with self._transaction_lock:
+            await self._db.execute(
+                """UPDATE run_log
+                   SET finished_at = ?, repos_analyzed = ?, prs_created = ?,
+                       findings = ?, errors = ?
+                   WHERE id = ?""",
+                (
+                    datetime.now(UTC).isoformat(),
+                    repos_analyzed,
+                    prs_created,
+                    findings,
+                    errors,
+                    run_id,
+                ),
+            )
+            await self._db.commit()
 
     async def get_stats(self) -> dict:
         """Get overall statistics."""
@@ -281,26 +427,27 @@ class Memory:
         time_to_close_hours: float = 0.0,
     ):
         """Record the outcome of a PR (merged, closed, rejected)."""
-        await self._db.execute(
-            """INSERT OR REPLACE INTO pr_outcomes
-               (repo, pr_number, pr_url, pr_type, outcome, feedback,
-                time_to_close_hours, recorded_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                repo,
-                pr_number,
-                pr_url,
-                pr_type,
-                outcome,
-                feedback,
-                time_to_close_hours,
-                datetime.now(UTC).isoformat(),
-            ),
-        )
-        await self._db.commit()
+        async with self._transaction_lock:
+            await self._db.execute(
+                """INSERT OR REPLACE INTO pr_outcomes
+                   (repo, pr_number, pr_url, pr_type, outcome, feedback,
+                    time_to_close_hours, recorded_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    repo,
+                    pr_number,
+                    pr_url,
+                    pr_type,
+                    outcome,
+                    feedback,
+                    time_to_close_hours,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            await self._db.commit()
 
-        # Auto-update repo preferences
-        await self._update_repo_preferences(repo)
+            # Auto-update repo preferences under the same connection lock.
+            await self._update_repo_preferences(repo)
 
     async def _update_repo_preferences(self, repo: str):
         """Recompute repo preferences from outcome history."""
@@ -409,13 +556,14 @@ class Memory:
         from datetime import timedelta
 
         expires_dt = now + timedelta(hours=ttl_hours)
-        await self._db.execute(
-            """INSERT OR REPLACE INTO working_memory
-               (repo, key, value, language, created_at, expires_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (repo, key, value, language, now.isoformat(), expires_dt.isoformat()),
-        )
-        await self._db.commit()
+        async with self._transaction_lock:
+            await self._db.execute(
+                """INSERT OR REPLACE INTO working_memory
+                   (repo, key, value, language, created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (repo, key, value, language, now.isoformat(), expires_dt.isoformat()),
+            )
+            await self._db.commit()
 
     async def get_context(self, repo: str, key: str) -> str | None:
         """Retrieve hot context for a repo, returns None if expired.
@@ -466,6 +614,9 @@ class Memory:
             Number of entries deleted.
         """
         now = datetime.now(UTC).isoformat()
-        cursor = await self._db.execute("DELETE FROM working_memory WHERE expires_at <= ?", (now,))
-        await self._db.commit()
-        return cursor.rowcount
+        async with self._transaction_lock:
+            cursor = await self._db.execute(
+                "DELETE FROM working_memory WHERE expires_at <= ?", (now,)
+            )
+            await self._db.commit()
+            return cursor.rowcount

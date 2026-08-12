@@ -35,8 +35,8 @@ from contribai.core.models import (
     Repository,
     Severity,
 )
+from contribai.orchestrator.memory import Memory
 from contribai.orchestrator.pipeline import ContribPipeline
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -95,7 +95,7 @@ def _stub_collaborators(
     repo: Repository,
     sample_finding: Finding,
     sample_contribution: Contribution,
-) -> "Memory":
+) -> Memory:
     """Wire AsyncMock collaborators onto a pipeline instance."""
     pipeline._github = AsyncMock()
     pipeline._github.close = AsyncMock()
@@ -139,14 +139,10 @@ def _stub_collaborators(
     pipeline._reviewer = AsyncMock()
     from contribai.orchestrator.review_gate import ReviewDecision
 
-    pipeline._reviewer.review = AsyncMock(
-        return_value=ReviewDecision(ReviewDecision.APPROVE)
-    )
+    pipeline._reviewer.review = AsyncMock(return_value=ReviewDecision(ReviewDecision.APPROVE))
 
     pipeline._repo_intel = AsyncMock()
     pipeline._repo_intel.profile = AsyncMock(return_value=None)
-
-    from contribai.orchestrator.memory import Memory
 
     pipeline._memory = Memory(pipeline.config.storage.resolved_db_path)
     return pipeline._memory
@@ -170,13 +166,9 @@ class TestAnalysisModeE2E:
         pipeline = ContribPipeline(pipeline_config)
         pipeline._analyzer = AsyncMock()
         pipeline._analyzer.analyze = AsyncMock(
-            return_value=AnalysisResult(
-                repo=mock_repo, findings=[sample_finding], analyzed_files=1
-            )
+            return_value=AnalysisResult(repo=mock_repo, findings=[sample_finding], analyzed_files=1)
         )
-        mem = _stub_collaborators(
-            pipeline, mock_repo, sample_finding, sample_contribution
-        )
+        mem = _stub_collaborators(pipeline, mock_repo, sample_finding, sample_contribution)
         await mem.init()
 
         with patch.object(pipeline, "_init_components", new=AsyncMock()):
@@ -197,13 +189,9 @@ class TestAnalysisModeE2E:
         pipeline = ContribPipeline(pipeline_config)
         pipeline._analyzer = AsyncMock()
         pipeline._analyzer.analyze = AsyncMock(
-            return_value=AnalysisResult(
-                repo=mock_repo, findings=[sample_finding], analyzed_files=1
-            )
+            return_value=AnalysisResult(repo=mock_repo, findings=[sample_finding], analyzed_files=1)
         )
-        mem = _stub_collaborators(
-            pipeline, mock_repo, sample_finding, sample_contribution
-        )
+        mem = _stub_collaborators(pipeline, mock_repo, sample_finding, sample_contribution)
         await mem.init()
 
         with patch.object(pipeline, "_init_components", new=AsyncMock()):
@@ -232,9 +220,7 @@ class TestShortCircuit:
         pipeline = ContribPipeline(pipeline_config)
         pipeline._analyzer = AsyncMock()
         pipeline._analyzer.analyze = AsyncMock()
-        mem = _stub_collaborators(
-            pipeline, mock_repo, sample_finding, sample_contribution
-        )
+        mem = _stub_collaborators(pipeline, mock_repo, sample_finding, sample_contribution)
         await mem.init()
 
         # Patch `_check_ai_policy` inside `steps.py` to return True (ban).
@@ -269,9 +255,7 @@ class TestIssueModeE2E:
 
         # Stubs
         pipeline._analyzer = AsyncMock()
-        mem = _stub_collaborators(
-            pipeline, mock_repo, sample_finding, sample_contribution
-        )
+        mem = _stub_collaborators(pipeline, mock_repo, sample_finding, sample_contribution)
         await mem.init()
 
         # Patch IssueSolver so we don't import the real one
@@ -289,11 +273,13 @@ class TestIssueModeE2E:
         fake_solver.fetch_solvable_issues = AsyncMock(return_value=fake_issues)
         fake_solver.solve_issue_deep = AsyncMock(return_value=fake_solve_result)
 
-        with patch.object(pipeline, "_init_components", new=AsyncMock()), \
-             patch(
-                 "contribai.issues.solver.IssueSolver",
-                 return_value=fake_solver,
-             ):
+        with (
+            patch.object(pipeline, "_init_components", new=AsyncMock()),
+            patch(
+                "contribai.issues.solver.IssueSolver",
+                return_value=fake_solver,
+            ),
+        ):
             result = await pipeline._process_repo_issues(mock_repo, dry_run=False, max_prs=1)
 
         await mem.close()

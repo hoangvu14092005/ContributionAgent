@@ -10,7 +10,9 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from contribai.control.mode import ExecutionMode
 from contribai.core.exceptions import ConfigError
+from contribai.publishing.policy import CapabilityPolicy
 
 
 class GitHubConfig(BaseModel):
@@ -54,7 +56,7 @@ class LLMConfig(BaseModel):
     # Vertex AI (Google Cloud)
     vertex_project: str = ""
     vertex_location: str = "global"
-    
+
     # Custom self-hosted models per task (env var configurable)
     custom_models: dict[str, str] = Field(default_factory=dict)
     custom_base_url: str = ""
@@ -71,11 +73,16 @@ class LLMConfig(BaseModel):
     #       - {provider: rocket-free-1, base_url: ..., model: kilo-auto/free}
     fallback_chains: dict[str, list[dict]] = Field(default_factory=dict)
     fallback_enabled: bool = False  # Master switch for fallback mechanism
+    # Model gateway boundary. Raw keys are resolved only for control-plane use
+    # when this flag is enabled; execution engines must call ModelGateway.
+    model_gateway_required: bool = False
+    model_gateway_url: str = ""
+    allowed_model_providers: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def resolve_api_key_and_defaults(self):
         """Fallback: env vars for API keys + default model per provider."""
-        if not self.api_key:
+        if not self.api_key and not self.model_gateway_required:
             env_map = {
                 "gemini": "GEMINI_API_KEY",
                 "openai": "OPENAI_API_KEY",
@@ -85,11 +92,13 @@ class LLMConfig(BaseModel):
             env_var = env_map.get(self.provider, "")
             if env_var:
                 self.api_key = os.environ.get(env_var, "")
-        
+
         # Custom base URL from env
         if not self.custom_base_url:
-            self.custom_base_url = os.environ.get("CUSTOM_LLM_BASE_URL", "http://localhost:20128/v1")
-        
+            self.custom_base_url = os.environ.get(
+                "CUSTOM_LLM_BASE_URL", "http://localhost:20128/v1"
+            )
+
         # Custom models per task from env vars
         if not self.custom_models:
             self.custom_models = {
@@ -101,7 +110,7 @@ class LLMConfig(BaseModel):
                 "compression": os.environ.get("LLM_MODEL_COMPRESSION", "gh/claude-sonnet-4.6"),
                 "default": os.environ.get("LLM_MODEL_DEFAULT", "gh/claude-sonnet-4.6"),
             }
-        
+
         # Vertex AI: project from env
         if not self.vertex_project:
             self.vertex_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
@@ -184,6 +193,7 @@ class SchedulerConfig(BaseModel):
     cron: str = "0 */6 * * *"  # every 6 hours
     timezone: str = "UTC"
     max_concurrent: int = 3
+    mode: ExecutionMode = ExecutionMode.SHADOW
 
 
 class WebConfig(BaseModel):
@@ -193,7 +203,18 @@ class WebConfig(BaseModel):
     port: int = 8787
     enabled: bool = True
     api_keys: list[str] = Field(default_factory=list)
+    webhook_enabled: bool = False
     webhook_secret: str = ""
+    webhook_mode: ExecutionMode = ExecutionMode.SHADOW
+
+    @model_validator(mode="after")
+    def validate_webhook_configuration(self):
+        """Reject webhook configurations that could trigger unsafe writes."""
+        if self.webhook_mode is ExecutionMode.LIVE:
+            raise ValueError("webhook_mode must be shadow or review_only, never live")
+        if self.webhook_enabled and not self.webhook_secret.strip():
+            raise ValueError("webhook_secret is required when webhook_enabled is true")
+        return self
 
 
 class PipelineConfig(BaseModel):
@@ -246,6 +267,18 @@ class SandboxConfig(BaseModel):
     docker_image: str = ""  # override default language image
 
 
+class EngineConfig(BaseModel):
+    """Coding-engine runtime policy and version pin configuration."""
+
+    enabled: list[str] = Field(default_factory=lambda: ["native"])
+    production: bool = False
+    deny_unpinned: bool = True
+    required_live_capabilities: list[str] = Field(
+        default_factory=lambda: ["cancellation", "sandbox", "model_gateway"]
+    )
+    version_policies: dict[str, dict[str, str | bool]] = Field(default_factory=dict)
+
+
 class ContribAIConfig(BaseModel):
     """Root configuration for ContribAIConfig."""
 
@@ -262,21 +295,25 @@ class ContribAIConfig(BaseModel):
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     multi_model: MultiModelConfig = Field(default_factory=MultiModelConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    engines: EngineConfig = Field(default_factory=EngineConfig)
+    capability_policy: CapabilityPolicy = Field(default_factory=CapabilityPolicy)
 
 
 def _expand_env_vars(obj):
     """Recursively expand ``${VAR}`` and ``${VAR:-default}`` in config values."""
-    import re
     import os
+    import re
 
     pattern = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 
     def _expand(value):
         if isinstance(value, str):
+
             def replacer(match):
                 var_name = match.group(1)
                 default = match.group(2)
                 return os.environ.get(var_name, default if default is not None else "")
+
             return pattern.sub(replacer, value)
         elif isinstance(value, dict):
             return {k: _expand(v) for k, v in value.items()}

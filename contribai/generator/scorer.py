@@ -29,6 +29,11 @@ class QualityReport:
         total = len(self.checks)
         return f"{passed}/{total} checks passed (score: {self.score:.0%})"
 
+    @property
+    def normalized_score(self) -> float:
+        """Explicit 0..1 score used by the verification control plane."""
+        return min(1.0, max(0.0, self.score))
+
 
 @dataclass
 class CheckResult:
@@ -134,7 +139,7 @@ class QualityScorer:
             # Calculate change ratio
             if len(original_lines) > 0:
                 lines_changed = sum(
-                    1 for old, new in zip(original_lines, new_lines) if old != new
+                    1 for old, new in zip(original_lines, new_lines, strict=False) if old != new
                 )
                 lines_changed += abs(len(new_lines) - len(original_lines))
                 change_ratio = lines_changed / len(original_lines)

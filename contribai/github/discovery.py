@@ -157,3 +157,14 @@ class RepoDiscovery:
             return s
 
         return sorted(repos, key=score, reverse=True)
+
+    @staticmethod
+    def prioritize_by_opportunity(
+        repos: list[Repository],
+        expected_values: dict[str, float],
+    ) -> list[Repository]:
+        """Sort already-discovered repos by read-only opportunity scores."""
+        return sorted(
+            repos,
+            key=lambda repo: (-expected_values.get(repo.full_name, float("-inf")), repo.full_name),
+        )

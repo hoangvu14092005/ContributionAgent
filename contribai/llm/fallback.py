@@ -34,13 +34,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 from contribai.core.exceptions import LLMError, LLMRateLimitError
+from contribai.llm.models import TaskType
 from contribai.llm.provider import (
     LLMProvider,
+    current_task_context,
     make_provider,
+    set_task_context,
 )
 
 if __name__ != "__main__":
@@ -66,27 +70,33 @@ class ProviderSlot:
     def __post_init__(self):
         if not self.name:
             self.name = f"{self.provider}:{self.model}"
+        if self.timeout <= 0:
+            raise ValueError("ProviderSlot timeout must be positive")
 
 
 # ── Provider factory ──────────────────────────────────────────────────────────
 
 
 # Slot provider names that are OpenAI-compatible but use the "custom" base class.
-_OPENAI_COMPATIBLE_SLOT_NAMES = frozenset({
-    "rocket-free-2",
-    "rocket-free-1",
-    "kilo",
-    "opencode",
-})
+_OPENAI_COMPATIBLE_SLOT_NAMES = frozenset(
+    {
+        "rocket-free-2",
+        "rocket-free-1",
+        "kilo",
+        "opencode",
+    }
+)
 
 # Native provider names known to the registry.
-_KNOWN_NATIVE_PROVIDERS = frozenset({
-    "openai",
-    "anthropic",
-    "ollama",
-    "gemini",
-    "custom",
-})
+_KNOWN_NATIVE_PROVIDERS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "ollama",
+        "gemini",
+        "custom",
+    }
+)
 
 
 def _create_provider_for_slot(slot: ProviderSlot, base_config: LLMConfig) -> LLMProvider:
@@ -111,6 +121,9 @@ def _create_provider_for_slot(slot: ProviderSlot, base_config: LLMConfig) -> LLM
     the configured key through and lets that class fall back to ``gh`` when
     it's empty.
     """
+    if base_config.model_gateway_required:
+        raise LLMError("fallback providers cannot bypass the required model gateway")
+
     # Build a fresh LLMConfig scoped to this slot
     slot_config = base_config.model_copy(deep=True)
     slot_config.base_url = slot.base_url
@@ -186,15 +199,13 @@ class FallbackChainProvider(LLMProvider):
         surfaced immediately so we don't mask real bugs.
         """
         import httpx
+
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):
+            return False
         if isinstance(exc, cls.FALLBACK_TRIGGERS):
             return True
         # Catch httpx HTTP errors (4xx/5xx) — they're transient from our perspective
-        if isinstance(exc, (httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout)):
-            return True
-        # Auth errors specifically should not fall back (they'll fail everywhere)
-        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):
-            return False
-        return False
+        return isinstance(exc, (httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout))
 
     def __init__(
         self,
@@ -205,9 +216,8 @@ class FallbackChainProvider(LLMProvider):
         super().__init__(config)
         self._chains = chains
         self._default_chain = default_chain or []
-        self._current_task = "default"
         self._inner_providers: dict[str, LLMProvider] = {}
-        self._attempts: list[FallbackAttempt] = []
+        self._attempts: deque[FallbackAttempt] = deque(maxlen=20)
         self._stats = {
             "total_calls": 0,
             "successful_calls": 0,
@@ -234,8 +244,18 @@ class FallbackChainProvider(LLMProvider):
     # ── Task context ─────────────────────────────────────────────────────────
 
     def set_task(self, task_type: str) -> None:
-        """Set the current task context (used by callers like PR Patrol)."""
-        self._current_task = task_type
+        """Deprecated compatibility shim for coroutine-local task routing."""
+        super().set_task(task_type)
+
+    @property
+    def _current_task(self) -> str:
+        """Legacy read-only view backed by coroutine-local context."""
+        return str(current_task_context() or "default")
+
+    @_current_task.setter
+    def _current_task(self, task_type: str) -> None:
+        """Keep legacy tests/callers working without provider-wide task state."""
+        set_task_context(task_type)
 
     # ── Core fallback execution ──────────────────────────────────────────────
 
@@ -243,13 +263,15 @@ class FallbackChainProvider(LLMProvider):
         self,
         method_name: str,
         *args: Any,
+        task: TaskType | str | None = None,
         **kwargs: Any,
     ) -> str:
         """Execute a method with provider fallback chain."""
-        chain = self._get_chain_for_task(self._current_task)
+        task_name = str(task or current_task_context() or "default")
+        chain = self._get_chain_for_task(task_name)
         if not chain:
             raise LLMError(
-                f"No fallback chain configured for task '{self._current_task}'. "
+                f"No fallback chain configured for task '{task_name}'. "
                 f"Configure llm.fallback_chains in config.yaml."
             )
 
@@ -261,26 +283,28 @@ class FallbackChainProvider(LLMProvider):
             try:
                 provider = self._get_provider_for_slot(slot)
                 method = getattr(provider, method_name)
-                result = await method(*args, **kwargs)
+                result = await asyncio.wait_for(method(*args, **kwargs), timeout=slot.timeout)
                 attempt.duration = time.time() - attempt.started_at
                 attempt.success = True
 
                 if idx > 0:
                     logger.warning(
                         "🔁 Used fallback #%d for task='%s' → %s (after %d failures)",
-                        idx, self._current_task, slot.name, idx,
+                        idx,
+                        task_name,
+                        slot.name,
+                        idx,
                     )
                     self._stats["fallback_uses"] += 1
                 else:
                     logger.info(
                         "✅ LLM call [task=%s] → %s",
-                        self._current_task, slot.name,
+                        task_name,
+                        slot.name,
                     )
 
                 self._stats["successful_calls"] += 1
-                self._stats["by_slot"][slot.name] = (
-                    self._stats["by_slot"].get(slot.name, 0) + 1
-                )
+                self._stats["by_slot"][slot.name] = self._stats["by_slot"].get(slot.name, 0) + 1
                 self._attempts.append(attempt)
                 return result
 
@@ -292,7 +316,10 @@ class FallbackChainProvider(LLMProvider):
                 last_error = e
                 logger.warning(
                     "❌ LLM fallback triggered [task=%s, slot=%s, error=%s]: %s",
-                    self._current_task, slot.name, type(e).__name__, e,
+                    task_name,
+                    slot.name,
+                    type(e).__name__,
+                    e,
                 )
                 continue
             except Exception as e:
@@ -305,7 +332,10 @@ class FallbackChainProvider(LLMProvider):
                     last_error = e
                     logger.warning(
                         "❌ LLM fallback triggered [task=%s, slot=%s, error=%s]: %s",
-                        self._current_task, slot.name, type(e).__name__, e,
+                        task_name,
+                        slot.name,
+                        type(e).__name__,
+                        e,
                     )
                     continue
                 # Real bug — don't fall back, raise immediately
@@ -315,24 +345,15 @@ class FallbackChainProvider(LLMProvider):
                 self._attempts.append(attempt)
                 logger.error(
                     "🚨 LLM non-fallback error [task=%s, slot=%s]: %s",
-                    self._current_task, slot.name, e,
-                )
-                raise
-                # Unknown error — don't try fallback, raise immediately
-                attempt.duration = time.time() - attempt.started_at
-                attempt.error = str(e)
-                attempt.error_type = type(e).__name__
-                self._attempts.append(attempt)
-                logger.error(
-                    "🚨 LLM non-fallback error [task=%s, slot=%s]: %s",
-                    self._current_task, slot.name, e,
+                    task_name,
+                    slot.name,
+                    e,
                 )
                 raise
 
         # All slots failed
         raise LLMError(
-            f"All {len(chain)} providers failed for task '{self._current_task}'. "
-            f"Last error: {last_error}"
+            f"All {len(chain)} providers failed for task '{task_name}'. Last error: {last_error}"
         )
 
     # ── Public LLMProvider interface ────────────────────────────────────────
@@ -344,6 +365,8 @@ class FallbackChainProvider(LLMProvider):
         system: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
+        task: TaskType | str | None = None,
         **kwargs,
     ) -> str:
         return await self._execute_with_fallback(
@@ -352,6 +375,8 @@ class FallbackChainProvider(LLMProvider):
             system=system,
             temperature=temperature,
             max_tokens=max_tokens,
+            model=model,
+            task=task,
             **kwargs,
         )
 
@@ -362,6 +387,8 @@ class FallbackChainProvider(LLMProvider):
         system: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
+        task: TaskType | str | None = None,
         **kwargs,
     ) -> str:
         return await self._execute_with_fallback(
@@ -370,6 +397,8 @@ class FallbackChainProvider(LLMProvider):
             system=system,
             temperature=temperature,
             max_tokens=max_tokens,
+            model=model,
+            task=task,
             **kwargs,
         )
 
@@ -397,13 +426,15 @@ class FallbackChainProvider(LLMProvider):
     @property
     def recent_attempts(self) -> list[FallbackAttempt]:
         """Return last N attempts for debugging."""
-        return self._attempts[-20:]
+        return list(self._attempts)
 
 
 # ── Helper to build chains from config ────────────────────────────────────────
 
 
-def build_fallback_chains(config: LLMConfig) -> tuple[dict[str, list[ProviderSlot]], list[ProviderSlot]]:
+def build_fallback_chains(
+    config: LLMConfig,
+) -> tuple[dict[str, list[ProviderSlot]], list[ProviderSlot]]:
     """Parse ``config.fallback_chains`` (dict) into ProviderSlot lists.
 
     Schema (YAML):

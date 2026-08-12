@@ -16,6 +16,7 @@ from fnmatch import fnmatch
 
 from contribai.analysis.context_compressor import ContextCompressor
 from contribai.analysis.repo_conventions import RepoConventions
+from contribai.context.context import ContributionContext
 from contribai.core.config import AnalysisConfig
 from contribai.core.models import (
     AnalysisResult,
@@ -29,6 +30,7 @@ from contribai.core.models import (
 from contribai.core.text_utils import strip_think_blocks
 from contribai.github.client import GitHubClient
 from contribai.llm.provider import LLMProvider
+from contribai.localization import ContributionTask, LocalizationSet, Localizer
 
 logger = logging.getLogger(__name__)
 
@@ -82,12 +84,36 @@ class CodeAnalyzer:
         self._compressor = ContextCompressor(
             max_context_tokens=getattr(config, "max_context_tokens", 30_000)
         )
+        self._localizer = Localizer()
         # Layer B: optional list of AnalyzerPlugin instances from the
         # PluginRegistry. Their findings are merged with the LLM-powered
         # analyzers during `analyze()`. None means "no plugins".
         self._plugin_analyzers: list = list(plugin_analyzers or [])
 
-    async def analyze(self, repo: Repository) -> AnalysisResult:
+    async def localize(
+        self,
+        task: ContributionTask | Finding,
+        context: ContributionContext,
+    ) -> LocalizationSet:
+        """Return N-best repair locations for a finding or contribution task."""
+        if isinstance(task, Finding):
+            task = ContributionTask.from_finding(task)
+        return await self._localizer.locate(task, context)
+
+    async def localize_findings(
+        self,
+        findings: list[Finding],
+        context: ContributionContext,
+    ) -> dict[str, LocalizationSet]:
+        """Localize findings without collapsing them to one guessed file."""
+        localized: dict[str, LocalizationSet] = {}
+        for finding in findings:
+            localized[finding.id or f"{finding.file_path}:{finding.title}"] = await self.localize(
+                finding, context
+            )
+        return localized
+
+    async def analyze(self, repo: Repository | ContributionContext) -> AnalysisResult:
         """Run full analysis on a repository.
 
         1. Fetch file tree
@@ -95,6 +121,9 @@ class CodeAnalyzer:
         3. Run enabled analyzers in parallel
         4. Aggregate and deduplicate findings
         """
+        if isinstance(repo, ContributionContext):
+            return await self._analyze_contribution_context(repo)
+
         start = time.monotonic()
 
         # Fetch file tree
@@ -131,13 +160,10 @@ class CodeAnalyzer:
         # before deduplication.
         if self._plugin_analyzers:
             plugin_tasks = [
-                self._run_plugin_analyzer(plugin, context)
-                for plugin in self._plugin_analyzers
+                self._run_plugin_analyzer(plugin, context) for plugin in self._plugin_analyzers
             ]
-            plugin_results = await asyncio.gather(
-                *plugin_tasks, return_exceptions=True
-            )
-            for plugin, result in zip(self._plugin_analyzers, plugin_results):
+            plugin_results = await asyncio.gather(*plugin_tasks, return_exceptions=True)
+            for plugin, result in zip(self._plugin_analyzers, plugin_results, strict=True):
                 if isinstance(result, Exception):
                     logger.error(
                         "Plugin analyzer %s failed: %s",
@@ -170,6 +196,35 @@ class CodeAnalyzer:
         duration = time.monotonic() - start
         return AnalysisResult(
             repo=repo,
+            findings=findings,
+            analyzed_files=len(analyzable),
+            skipped_files=len(file_tree) - len(analyzable),
+            analysis_duration_sec=round(duration, 2),
+        )
+
+    async def _analyze_contribution_context(
+        self,
+        contribution_context: ContributionContext,
+    ) -> AnalysisResult:
+        """Analyze an already-built context without fetching a competing one."""
+        start = time.monotonic()
+        context = contribution_context.to_repo_context()
+        file_tree = context.file_tree
+        analyzable = self._select_files(file_tree)
+        analyzer_tasks = [
+            self._run_analyzer(name, context) for name in self._config.enabled_analyzers
+        ]
+        results = await asyncio.gather(*analyzer_tasks, return_exceptions=True)
+        all_findings: list[Finding] = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("Analyzer failed: %s", result)
+            elif isinstance(result, list):
+                all_findings.extend(result)
+        findings = self._filter_severity(self._deduplicate(all_findings))
+        duration = time.monotonic() - start
+        return AnalysisResult(
+            repo=contribution_context.repo,
             findings=findings,
             analyzed_files=len(analyzable),
             skipped_files=len(file_tree) - len(analyzable),
@@ -263,7 +318,7 @@ class CodeAnalyzer:
         # Detect project profile and style
         profile = self._detect_project_profile(repo, tree, readme)
         style_guide = self._build_style_guide(relevant_files)
-        
+
         # Extract repository conventions (Phase 1 - Quick Win #1)
         conventions = RepoConventions.extract_from_files(repo, relevant_files)
         logger.info(
@@ -273,7 +328,7 @@ class CodeAnalyzer:
             conventions.quote_style,
             conventions.confidence * 100,
         )
-        
+
         coding_style = (
             f"PROJECT PROFILE:\n{profile}\n\n"
             f"STYLE GUIDE:\n{style_guide}\n\n"
@@ -541,7 +596,7 @@ class CodeAnalyzer:
             )
 
         # v4.0: Inject repo intelligence + PR history if available
-        repo_intel_ctx = getattr(context, "_repo_intel_context", "")
+        repo_intel_ctx = context.repo_intelligence
         if repo_intel_ctx:
             profile_ctx += f"\n{repo_intel_ctx}\n"
 
@@ -577,9 +632,9 @@ class CodeAnalyzer:
 
         try:
             # Set task type for custom provider
-            if hasattr(self._llm, 'set_task'):
-                self._llm.set_task('analysis')
-            
+            if hasattr(self._llm, "set_task"):
+                self._llm.set_task("analysis")
+
             # Use higher max_tokens for analysis to avoid truncation (max 3 findings expected)
             response = await self._llm.complete(
                 prompt, system=system, temperature=0.2, max_tokens=4096
@@ -776,6 +831,7 @@ class CodeAnalyzer:
         """Parse LLM response into Finding objects."""
         import json
         import re
+
         import yaml
 
         findings: list[Finding] = []
@@ -793,13 +849,12 @@ class CodeAnalyzer:
 
         # Strip `` blocks (MiniMax-M3 and similar models prepend reasoning)
         # Layer A: consolidated into contribai.core.text_utils (was inline duplicate in 4 files)
-        from contribai.core.text_utils import strip_think_blocks
 
         response = strip_think_blocks(response)
 
         try:
             # Try JSON first (more reliable for complex strings)
-            json_match = re.search(r'```json\s*\n(.*?)\n```', response, re.DOTALL)
+            json_match = re.search(r"```json\s*\n(.*?)\n```", response, re.DOTALL)
             if json_match:
                 try:
                     parsed = json.loads(json_match.group(1))
@@ -823,12 +878,12 @@ class CodeAnalyzer:
 
             # Clean up the YAML text
             yaml_text = yaml_text.strip()
-            
+
             # Skip if YAML appears truncated or malformed
             if not yaml_text or len(yaml_text) < 10:
                 logger.debug("YAML text too short or empty for %s", analyzer_name)
                 return []
-            
+
             # Check for obvious truncation markers
             if yaml_text.endswith("...") and not yaml_text.count("\n") > 2:
                 logger.debug("YAML appears truncated for %s", analyzer_name)
@@ -838,9 +893,13 @@ class CodeAnalyzer:
             try:
                 parsed = yaml.safe_load(yaml_text)
             except yaml.YAMLError as ye:
-                logger.warning("YAML parse error for %s: %s. Trying JSON fallback.", analyzer_name, str(ye)[:100])
+                logger.warning(
+                    "YAML parse error for %s: %s. Trying JSON fallback.",
+                    analyzer_name,
+                    str(ye)[:100],
+                )
                 # Try to extract JSON array/object from response
-                json_match = re.search(r'\[.*\]|\{.*\}', response, re.DOTALL)
+                json_match = re.search(r"\[.*\]|\{.*\}", response, re.DOTALL)
                 if json_match:
                     try:
                         parsed = json.loads(json_match.group(0))
@@ -849,7 +908,7 @@ class CodeAnalyzer:
                         return []
                 else:
                     # Last resort: try to extract JSON from the YAML text itself
-                    json_match = re.search(r'\[.*\]|\{.*\}', yaml_text, re.DOTALL)
+                    json_match = re.search(r"\[.*\]|\{.*\}", yaml_text, re.DOTALL)
                     if json_match:
                         try:
                             parsed = json.loads(json_match.group(0))
@@ -858,7 +917,7 @@ class CodeAnalyzer:
                             return []
                     else:
                         return []
-            
+
             if not parsed:
                 return []
 
@@ -876,7 +935,7 @@ class CodeAnalyzer:
     ) -> list[Finding]:
         """Create Finding objects from parsed items."""
         findings: list[Finding] = []
-        
+
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -900,7 +959,7 @@ class CodeAnalyzer:
                     suggestion=item.get("suggestion"),
                 )
             )
-        
+
         logger.info("Analyzer %s found %d issues", analyzer_name, len(findings))
         return findings
 

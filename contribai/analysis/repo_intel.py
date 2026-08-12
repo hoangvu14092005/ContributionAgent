@@ -34,6 +34,14 @@ class RepoProfile:
     avg_review_hours: float = 0.0
     # Whether the repo is actively maintained
     is_active: bool = True
+    # Historical merged/closed PR ratio used by opportunity scoring
+    merge_rate: float = 0.0
+    # Open PR pressure can reduce merge probability
+    open_pr_backlog: int = 0
+    # Repository policy/runtime signals (safe defaults for legacy callers)
+    ai_policy_allows: bool = True
+    ci_enabled: bool = True
+    tests_present: bool = True
     # Preferred contribution types based on merged PRs
     preferred_types: list[str] = field(default_factory=list)
     # Types that were rejected (closed without merge)
@@ -56,6 +64,10 @@ class RepoProfile:
                 parts.append(f"  #{issue['number']}: {issue['title']} [{labels}]")
         if self.avg_review_hours > 0:
             parts.append(f"- Avg review time: {self.avg_review_hours:.0f}h")
+        parts.append(f"- Historical merge rate: {self.merge_rate:.0%}")
+        if self.open_pr_backlog:
+            parts.append(f"- Open PR backlog: {self.open_pr_backlog}")
+        parts.append(f"- AI contributions allowed: {'yes' if self.ai_policy_allows else 'no'}")
 
         return "\n".join(parts)
 
@@ -109,9 +121,11 @@ class RepoIntelligence:
         try:
             merged_types, rejected_types, avg_hours = await self._analyze_pr_history(owner, repo)
             profile.merged_pr_types = merged_types
-            profile.preferred_types = list(set(merged_types))
-            profile.rejected_types = list(set(rejected_types))
+            profile.preferred_types = sorted(set(merged_types))
+            profile.rejected_types = sorted(set(rejected_types))
             profile.avg_review_hours = avg_hours
+            total_prs = len(merged_types) + len(rejected_types)
+            profile.merge_rate = len(merged_types) / total_prs if total_prs else 0.0
         except Exception as e:
             logger.debug("Could not analyze PR history for %s: %s", full_name, e)
 
@@ -120,6 +134,12 @@ class RepoIntelligence:
             profile.actionable_issues = await self._find_actionable_issues(owner, repo)
         except Exception as e:
             logger.debug("Could not fetch issues for %s: %s", full_name, e)
+
+        try:
+            open_prs = await self._github.list_pull_requests(owner, repo, state="open", per_page=30)
+            profile.open_pr_backlog = len(open_prs)
+        except Exception as e:
+            logger.debug("Could not fetch open PR backlog for %s: %s", full_name, e)
 
         # 3. Build summary
         profile.summary = profile.to_prompt_context()

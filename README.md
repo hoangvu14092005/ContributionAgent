@@ -5,8 +5,8 @@
 > **✨ Custom LLM Support** — Use your own self-hosted LLM with per-task model routing
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-431%20passed-brightgreen)](#testing)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-CI-brightgreen)](#testing)
 [![Version](https://img.shields.io/badge/version-4.1.0-blue)](https://github.com/chinhkrb113/ContribAI/releases)
 [![Custom LLM](https://img.shields.io/badge/Custom%20LLM-Supported-green)](#custom-llm-support)
 
@@ -14,16 +14,13 @@
 ContribAI discovers open source repositories, analyzes code for improvements, generates fixes, and submits Pull Requests — all autonomously.
 
 ```
-  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-  │ Discovery│───▶│ Analysis │───▶│Generator │───▶│ PR + CI  │───▶│ Patrol   │
-  │          │    │ 20 skills│    │ LLM +    │    │ Fork,    │    │ Auto-fix │
-  │ Find repos│    │ Security │    │ self-    │    │ commit,  │    │ review   │
-  │ by lang, │    │ quality, │    │ review,  │    │ create   │    │ feedback │
-  │ stars    │    │ perf     │    │ scoring  │    │ PR + CLA │    │ & reply  │
-  └──────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘
+  Opportunity → WorkItem → isolated workspace → EngineDriver
+                                      ↓
+  PatchCollector → Verification → Review → PublishPermit → GitHubPublisher
 ```
 
-**Safety:** Quality gate (7-check scorer), duplicate detection, AI policy respect, CI monitoring, rate limiting, dry-run mode
+**Safety:** isolated attempts, scoped credentials, bounded budgets, independent
+verification, hash-bound review, idempotent permits, and one GitHub write authority.
 
 ## Quick Start
  Configure
@@ -157,21 +154,51 @@ ContribAI supports **self-hosted LLM endpoints** with OpenAI-compatible API form
 
 ## Architecture
 
+The active contribution path is controlled by a WorkItem-based control plane:
+
+```text
+CLI / Web / MCP / Scheduler / Webhook
+                 ↓
+          CommandService
+                 ↓
+             WorkItem
+                 ↓
+ WorkspaceManager + EngineRouter
+                 ↓
+ EngineDriver (Native or optional external adapter)
+                 ↓
+ PatchCollector → Verification → ReviewService
+                 ↓
+       PublishPermit → GitHubPublisher
+```
+
+Coding engines can edit only an isolated workspace. They do not receive
+GitHub write capability, raw provider keys, SSH credentials, or Docker socket
+access. See [`docs/CONTRIBUTION_CONTROL_PLANE.md`](docs/CONTRIBUTION_CONTROL_PLANE.md)
+for the current boundary and transitional legacy pipeline notes.
+
 ```
 contribai/
-├── core/           # Config, models, middleware, events, retry, quotas
+├── control/        # CommandService and execution modes
+├── core/           # Config, models, events, retry, quotas
 ├── llm/            # Multi-provider LLM + task routing + context management
 ├── github/         # GitHub API client, discovery, guidelines
 ├── analysis/       # 20+ analysis skills + framework detection + compression
-├── generator/      # Fix generation + self-review + quality scoring
-├── orchestrator/   # Pipeline, SQLite memory (7 tables), review gate
+├── engines/        # EngineDriver, PatchCollector, Native + optional adapters
+├── execution/      # Budgets, credentials, workspaces and trajectories
+├── verification/   # Independent syntax/test/lint/security evidence
+├── review/         # Hash-bound review decisions and dynamic context
+├── publishing/     # PublishPermit and the only GitHub write authority
+├── opportunity/    # Issue-first expected-value ranking and learning
+├── generator/      # Legacy generation path during migration
+├── orchestrator/   # Entry-point integration, SQLite memory, review gate
 ├── pr/             # PR lifecycle + patrol + CLA/DCO compliance
 ├── issues/         # Issue classification + multi-file solving
 ├── agents/         # Sub-agent registry (DeerFlow-inspired)
 ├── tools/          # Extensible tool protocol
 ├── mcp/            # MCP client for external tools
 ├── mcp_server.py   # MCP server (14 tools for Claude Desktop)
-├── sandbox/        # Docker-based code validation
+├── sandbox/        # Legacy validation helper; outer WorkspaceManager is authority
 ├── web/            # FastAPI dashboard + webhooks + auth
 ├── scheduler/      # APScheduler cron automation
 ├── notifications/  # Slack, Discord, Telegram
@@ -180,7 +207,10 @@ contribai/
 └── cli/            # Rich CLI + TUI
 ```
 
-See [`docs/system-architecture.md`](docs/system-architecture.md) for detailed architecture.
+See [`docs/CONTRIBUTION_CONTROL_PLANE.md`](docs/CONTRIBUTION_CONTROL_PLANE.md) for detailed active architecture.
+The older [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+[`docs/ARCHITECTURE_V2.md`](docs/ARCHITECTURE_V2.md) are historical references,
+not current publish or engine call paths.
 
 ## Docker
 
@@ -193,7 +223,7 @@ docker compose up -d dashboard scheduler  # Dashboard + scheduler
 ## Testing
 
 ```bash
-pytest tests/ -v                    # Run all tests (634 as of Layer C)
+pytest tests/ -v                    # Run the full test suite
 pytest tests/ -v --cov=contribai    # With coverage
 ruff check contribai/               # Lint
 ruff format contribai/              # Format
@@ -292,4 +322,3 @@ The pipeline auto-discovers entry-point plugins at init via
 |-----|-------------|
 | [**BAO_MAT_TOKEN.md**](docs/BAO_MAT_TOKEN.md) | **Token security** — How to protect GitHub tokens (Tiếng Việt) |
 | [`GITHUB_TOKEN_SETUP.md`](docs/GITHUB_TOKEN_SETUP.md) | GitHub token creation guide |
-

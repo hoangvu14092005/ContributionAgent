@@ -648,7 +648,7 @@ contribai status
 ## Câu Hỏi Thường Gặp (FAQ)
 
 **Q: ContribAI có miễn phí không?**
-A: Code là open source (AGPL-3.0), nhưng bạn cần trả phí cho LLM API (Gemini, OpenAI, etc.) hoặc tự host.
+A: Code là open source theo MIT, nhưng bạn cần trả phí cho LLM API (Gemini, OpenAI, etc.) hoặc tự host.
 
 **Q: Tôi cần bao nhiêu tiền cho LLM API?**
 A: Phụ thuộc vào usage. Ước tính ~$0.01-0.05 per PR với Gemini Flash.

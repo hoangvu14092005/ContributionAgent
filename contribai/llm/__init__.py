@@ -11,12 +11,12 @@ Public API (Layer B):
 """
 
 from contribai.llm.provider import (
-    LLMProvider,
     LLM_PROVIDERS,
     AnthropicProvider,
     CopilotProvider,
     CustomProvider,
     GeminiProvider,
+    LLMProvider,
     MultiModelProvider,
     OllamaProvider,
     OpenAIProvider,
@@ -27,17 +27,17 @@ from contribai.llm.provider import (
 )
 
 __all__ = [
-    "LLMProvider",
     "LLM_PROVIDERS",
-    "register_provider",
-    "make_provider",
-    "available_providers",
     "AnthropicProvider",
     "CopilotProvider",
     "CustomProvider",
     "GeminiProvider",
+    "LLMProvider",
     "MultiModelProvider",
     "OllamaProvider",
     "OpenAIProvider",
+    "available_providers",
     "create_llm_provider",
+    "make_provider",
+    "register_provider",
 ]
