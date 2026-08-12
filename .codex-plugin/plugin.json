@@ -1,0 +1,17 @@
+{
+  "name": "ak-engineer",
+  "version": "0.2.0",
+  "description": "AgentKit engineer skills and workflow support for this repository.",
+  "author": {
+    "name": "AgentKit"
+  },
+  "skills": "./.agents/skills/",
+  "interface": {
+    "displayName": "AgentKit Engineer",
+    "shortDescription": "Engineering workflows, skills, and repository automation",
+    "longDescription": "Project-local AgentKit skills are available to the coding agent through the repository skill tree.",
+    "developerName": "AgentKit",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Write"]
+  }
+}

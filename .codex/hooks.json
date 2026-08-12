@@ -1,0 +1,170 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/usage-quota-cache-refresh.cjs'",
+            "commandWindows": ".codex/hooks/usage-quota-cache-refresh.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/plan-format-kanban.cjs'",
+            "commandWindows": ".codex/hooks/plan-format-kanban.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/dev-rules-reminder.cjs'",
+            "commandWindows": ".codex/hooks/dev-rules-reminder.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "Write|Edit"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/precompact-capture.cjs'",
+            "commandWindows": ".codex/hooks/precompact-capture.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "manual|auto"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/scout-block.cjs'",
+            "commandWindows": ".codex/hooks/scout-block.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      },
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/descriptive-name.cjs'",
+            "commandWindows": ".codex/hooks/descriptive-name.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/privacy-block.cjs'",
+            "commandWindows": ".codex/hooks/privacy-block.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "Write|Edit|Bash"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/session-init.cjs'",
+            "commandWindows": ".codex/hooks/session-init.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume|clear|compact"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/cook-after-plan-reminder.cjs'",
+            "commandWindows": ".codex/hooks/cook-after-plan-reminder.cmd",
+            "type": "command"
+          },
+          {
+            "command": "node '.codex/hooks/session-state.cjs'",
+            "commandWindows": ".codex/hooks/session-state.cmd",
+            "type": "command"
+          },
+          {
+            "command": "node '.codex/hooks/usage-quota-cache-refresh.cjs'",
+            "commandWindows": ".codex/hooks/usage-quota-cache-refresh.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/subagent-init.cjs'",
+            "commandWindows": ".codex/hooks/subagent-init.cmd",
+            "type": "command"
+          },
+          {
+            "command": "node '.codex/hooks/team-context-inject.cjs'",
+            "commandWindows": ".codex/hooks/team-context-inject.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/session-state.cjs'",
+            "commandWindows": ".codex/hooks/session-state.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "node '.codex/hooks/dev-rules-reminder.cjs'",
+            "commandWindows": ".codex/hooks/dev-rules-reminder.cmd",
+            "type": "command"
+          },
+          {
+            "command": "node '.codex/hooks/secret-output-guardrail.cjs'",
+            "commandWindows": ".codex/hooks/secret-output-guardrail.cmd",
+            "type": "command"
+          },
+          {
+            "command": "node '.codex/hooks/simplify-gate.cjs'",
+            "commandWindows": ".codex/hooks/simplify-gate.cmd",
+            "type": "command"
+          },
+          {
+            "command": "node '.codex/hooks/usage-quota-cache-refresh.cjs'",
+            "commandWindows": ".codex/hooks/usage-quota-cache-refresh.cmd",
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ]
+  }
+}
